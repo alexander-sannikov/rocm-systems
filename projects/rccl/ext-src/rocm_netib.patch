@@ -81,7 +81,7 @@ index 9bfd8dcf..4d3f0a08 100644
 +    ncclIbUseInline = ncclParamIbUseInline();
 +    ncclIbGdrFlushDisable = ncclParamIbGdrFlushDisable();
 +
-+    rcclAinicRoce = ((rcclParamAinicRoce() == 1) ? true : false);
++    rcclAinicRoce = (rcclUseAinic() ? true : false);
 +    if (rcclAinicRoce) {
 +      // for AINIC, these params are defaulted to enabled unless user forces it to disable(0).
 +      rcclCtsInlineData = ((rcclParamCtsInlineData() == 0) ? false : true);
