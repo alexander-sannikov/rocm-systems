@@ -13,29 +13,39 @@ union ncclSocketAddress ncclIbIfAddr;
 
 int ncclNMergedIbDevs = -1;
 int ncclNIbDevs = -1;
-struct ncclIbMergedDev ncclIbMergedDevs[MAX_IB_VDEVS];
-struct ncclIbDev ncclIbDevs[MAX_IB_DEVS];
+struct ncclIbMergedDev IbCastMergedDevs[MAX_IB_VDEVS];
+struct ncclIbDev IbCastDevs[MAX_IB_DEVS];
 int ncclIbRelaxedOrderingEnabled = 0;
+
+bool rcclAinicRoce = 0;
+bool rcclCtsInlineData = 0;
+bool rcclCtsOffloadEnabled = 0;
+bool ncclIbUseInline = 0;
+int ncclIbGdrFlushDisable = 0;
+
+ncclChannelToUd nccl_channel_ud_map[MAX_IB_DEVS][MAXCHANNELS][ncclIbChannelTypeMax];
+bool nccl_channel_last_ud[MAX_IB_DEVS][ncclIbChannelTypeMax];
 
 ncclProfilerCallback_t ncclProfilerFunction;
 
-NCCL_PARAM(IbSplitDataOnQps, "IB_SPLIT_DATA_ON_QPS", 0);
+NCCL_PARAM(IbCastSplitDataOnQps, "IB_SPLIT_DATA_ON_QPS", 0);
 NCCL_PARAM(IbPrepostReceiveWorkRequests, "IB_PREPOST_RECEIVE_WORK_REQUESTS", -2);
-NCCL_PARAM(IbAsyncEvents,"IB_RETURN_ASYNC_EVENTS",1);
+NCCL_PARAM(IbCastAsyncEvents,"IB_RETURN_ASYNC_EVENTS",1);
 extern int ncclParamIbReceiverSideMatchingScheme();
 extern int ncclParamIbOooRq();
 extern int ncclParamIbResiliencyPortFailover();
 
 
-ncclResult_t ncclIbStatsCheckFatalCount(struct ncclIbStats* stat, const char* funcName) {
-  if (ncclParamIbAsyncEvents() && COMPILER_ATOMIC_LOAD(&stat->fatalErrorCount, std::memory_order_relaxed)) {
-    WARN("communicator encountered a fatal error (detected in %s)", funcName);
+ncclResult_t IbCastStatsCheckFatalCount(struct ncclIbStats* stat, const char* funcName) {
+  if (ncclParamIbCastAsyncEvents() && __atomic_load_n(&stat->fatalErrorCount, __ATOMIC_RELAXED)) {
+    ERROR("RCCL encountered a communication fatal error (detected in %s)\n", funcName);
+    ERROR("RCCL cannot recover from this network failure and now exiting. Please check the network health.");
     return ncclSystemError;
   }
   return ncclSuccess;
 }
 
-struct ncclIbNetCommDevBase* ncclIbGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex) {
+struct ncclIbNetCommDevBase* IbCastGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex) {
   if (base->isSend) {
     struct ncclIbSendComm* sComm = (struct ncclIbSendComm*) base;
     return &sComm->devs[devIndex].base;
@@ -57,7 +67,7 @@ ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
     memset(&baseComm->qps[i].rtsAttr, 0, sizeof(baseComm->qps[i].rtsAttr));
   }
   baseComm->nqps = -1;
-  baseComm->splitDataOnQps = ncclParamIbSplitDataOnQps();
+  baseComm->splitDataOnQps = ncclParamIbCastSplitDataOnQps();
   baseComm->nDataQps = -1;
   baseComm->isSend = isSend;
   baseComm->ready = 0;
@@ -108,8 +118,8 @@ ncclResult_t ncclIbSendCommInit(struct ncclIbSendComm* sendComm) {
   return ncclSuccess;
 }
 
-std::thread ncclIbAsyncThread;
-void* ncclIbAsyncThreadMain(void* args) {
+pthread_t IbCastAsyncThread;
+static void* IbCastAsyncThreadMain(void* args) {
   struct ncclIbDev* dev = (struct ncclIbDev*)args;
   while (1) {
     struct ibv_async_event event;
@@ -170,27 +180,35 @@ void* ncclIbAsyncThreadMain(void* args) {
   return NULL;
 }
 
-ncclNet_t ncclNetIb = {
-  "IB",
-  ncclIbInit,
-  ncclIbDevices,
-  ncclIbGetProperties,
-  ncclIbListen,
-  ncclIbConnect,
-  ncclIbAccept,
-  ncclIbRegMr,
-  ncclIbRegMrDmaBuf,
-  ncclIbDeregMr,
-  ncclIbIsend,
-  ncclIbIrecv,
-  ncclIbIflush,
-  ncclIbTest,
-  ncclIbCloseSend,
-  ncclIbCloseRecv,
-  ncclIbCloseListen,
+ncclResult_t rcclCastNetP2pPolicy(void* handle, int isP2p) {
+  if (!handle) return ncclInvalidArgument;
+  struct ncclIbHandle* ibHandle = (struct ncclIbHandle*)handle;
+  if (ibHandle->magic != NCCL_SOCKET_MAGIC) return ncclInvalidArgument;
+  ibHandle->isP2p = isP2p;
+  return ncclSuccess;
+}
+
+ncclNet_t netIbCast = {
+  "IB-CAST",
+  IbCastInit,
+  IbCastDevices,
+  IbCastGetProperties,
+  IbCastListen,
+  IbCastConnect,
+  IbCastAccept,
+  IbCastRegMr,
+  IbCastRegMrDmaBuf,
+  IbCastDeregMr,
+  IbCastIsend,
+  IbCastIrecv,
+  IbCastIflush,
+  IbCastTest,
+  IbCastCloseSend,
+  IbCastCloseRecv,
+  IbCastCloseListen,
   NULL /* getDeviceMr */,
   NULL /* irecvConsumed */,
-  ncclIbMakeVDevice,
-  ncclIbFinalize,
-  ncclIbSetNetAttr,
+  IbCastMakeVDevice,
+  IbCastFinalize,
+  IbCastSetNetAttr,
 };

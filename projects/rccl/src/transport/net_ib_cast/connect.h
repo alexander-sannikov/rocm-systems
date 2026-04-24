@@ -64,6 +64,7 @@ struct ncclIbConnectionMetadata {
   int ndevs;
   int tc;
   int sl;
+  int isP2p;
 };
 
 ncclResult_t ncclIbQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* createQpAttrs);
@@ -72,6 +73,13 @@ ncclResult_t ncclIbQpRtr(struct ncclIbQp* qp);
 ncclResult_t ncclIbQpRts(struct ncclIbQp* qp);
 ncclResult_t ncclIbQpReset(struct ncclIbQp* qp);
 ncclResult_t ncclIbQpError(struct ncclIbQp* qp);
+
+ncclResult_t IbCastCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
+                             int access_flags, void* qp_context, struct ncclIbQp* qp,
+                             int channel_id, bool data_qp, int8_t cts_qp_slot);
+ncclResult_t IbCastRtrQp(struct ibv_qp* qp, struct ncclIbGidInfo* sGidInfo, uint32_t dest_qp_num,
+                          struct ncclIbDevInfo* info, bool fifoTc, int tc, int sl);
+ncclResult_t IbCastRtsQp(struct ibv_qp* qp);
 
 ncclResult_t ncclIbPostReceiveWorkRequestsOnQp(struct ncclIbRecvComm* recvComm, ncclIbQp* dataQp);
 
