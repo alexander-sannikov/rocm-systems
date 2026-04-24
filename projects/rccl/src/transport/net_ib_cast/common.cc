@@ -9,23 +9,23 @@
 #include "connect.h"
 #include "p2p_resiliency.h"
 
-char ncclIbIfName[MAX_IF_NAME_SIZE+1];
-union ncclSocketAddress ncclIbIfAddr;
+char IbCastIfName[MAX_IF_NAME_SIZE+1];
+union ncclSocketAddress IbCastIfAddr;
 
 int ncclNMergedIbDevs = -1;
 int ncclNIbDevs = -1;
-struct ncclIbMergedDev IbCastMergedDevs[MAX_IB_VDEVS];
-struct ncclIbDev IbCastDevs[MAX_IB_DEVS];
-int ncclIbRelaxedOrderingEnabled = 0;
+struct IbCastMergedDev IbCastMergedDevs[MAX_IB_VDEVS];
+struct IbCastDev IbCastDevs[MAX_IB_DEVS];
+int IbCastRelaxedOrderingEnabled = 0;
 
 bool rcclAinicRoce = 0;
 bool rcclCtsInlineData = 0;
 bool rcclCtsOffloadEnabled = 0;
-bool ncclIbUseInline = 0;
-int ncclIbGdrFlushDisable = 0;
+bool IbCastUseInline = 0;
+int IbCastGdrFlushDisable = 0;
 
-ncclChannelToUd nccl_channel_ud_map[MAX_IB_DEVS][MAXCHANNELS][ncclIbChannelTypeMax];
-bool nccl_channel_last_ud[MAX_IB_DEVS][ncclIbChannelTypeMax];
+ncclChannelToUd nccl_channel_ud_map[MAX_IB_DEVS][MAXCHANNELS][IbCastChannelTypeMax];
+bool nccl_channel_last_ud[MAX_IB_DEVS][IbCastChannelTypeMax];
 
 ncclProfilerCallback_t ncclProfilerFunction;
 
@@ -37,7 +37,7 @@ extern int ncclParamIbOooRq();
 extern int ncclParamIbResiliencyPortFailover();
 
 
-ncclResult_t IbCastStatsCheckFatalCount(struct ncclIbStats* stat, const char* funcName) {
+ncclResult_t IbCastStatsCheckFatalCount(struct IbCastStats* stat, const char* funcName) {
   if (ncclParamIbCastAsyncEvents() && __atomic_load_n(&stat->fatalErrorCount, __ATOMIC_RELAXED)) {
     ERROR("RCCL encountered a communication fatal error (detected in %s)\n", funcName);
     ERROR("RCCL cannot recover from this network failure and now exiting. Please check the network health.");
@@ -46,17 +46,17 @@ ncclResult_t IbCastStatsCheckFatalCount(struct ncclIbStats* stat, const char* fu
   return ncclSuccess;
 }
 
-struct ncclIbNetCommDevBase* IbCastGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex) {
+struct IbCastNetCommDevBase* IbCastGetNetCommDevBase(IbCastNetCommBase* base, int devIndex) {
   if (base->isSend) {
-    struct ncclIbSendComm* sComm = (struct ncclIbSendComm*) base;
+    struct IbCastSendComm* sComm = (struct IbCastSendComm*) base;
     return &sComm->devs[devIndex].base;
   } else {
-    struct ncclIbRecvComm* rComm = (struct ncclIbRecvComm*) base;
+    struct IbCastRecvComm* rComm = (struct IbCastRecvComm*) base;
     return &rComm->devs[devIndex].base;
   }
 }
 
-ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend) {
+ncclResult_t IbCastBaseCommInit(struct IbCastNetCommBase* baseComm, bool isSend) {
   for (int i = 0; i < NCCL_IB_MAX_QPS; i++) {
     baseComm->qps[i].devIndex= -1;
     baseComm->qps[i].remDevIdx= -1;
@@ -73,7 +73,7 @@ ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
   baseComm->isSend = isSend;
   baseComm->ready = 0;
 
-  NCCLCHECK(ncclIbResiliencyInit(baseComm, &baseComm->resiliency));
+  NCCLCHECK(IbCastResiliencyInit(baseComm, &baseComm->resiliency));
   baseComm->recvMatchingScheme = ncclParamIbReceiverSideMatchingScheme() == -2 ? BY_INDEX : ncclParamIbReceiverSideMatchingScheme();
 
   if (ncclParamIbOooRq() || (ncclParamIbResiliencyPortFailover() == 1)) {
@@ -86,8 +86,8 @@ ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbRecvCommInit(struct ncclIbRecvComm* recvComm) {
-  NCCLCHECK(ncclIbBaseCommInit(&recvComm->base, false));
+ncclResult_t IbCastRecvCommInit(struct IbCastRecvComm* recvComm) {
+  NCCLCHECK(IbCastBaseCommInit(&recvComm->base, false));
   recvComm->ibRecvWorkRequest = {
     .wr_id = NCCL_IB_RECV_WR_ID_DUMMY,
     .next = NULL,
@@ -114,14 +114,14 @@ ncclResult_t ncclIbRecvCommInit(struct ncclIbRecvComm* recvComm) {
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbSendCommInit(struct ncclIbSendComm* sendComm) {
-  NCCLCHECK(ncclIbBaseCommInit(&sendComm->base, true));
+ncclResult_t IbCastSendCommInit(struct IbCastSendComm* sendComm) {
+  NCCLCHECK(IbCastBaseCommInit(&sendComm->base, true));
   return ncclSuccess;
 }
 
 pthread_t IbCastAsyncThread;
 void* IbCastAsyncThreadMain(void* args) {
-  struct ncclIbDev* dev = (struct ncclIbDev*)args;
+  struct IbCastDev* dev = (struct IbCastDev*)args;
   while (1) {
     struct ibv_async_event event;
     if (ncclSuccess != wrap_ibv_get_async_event(dev->context, &event)) { break; }
@@ -134,19 +134,19 @@ void* IbCastAsyncThreadMain(void* args) {
     case IBV_EVENT_DEVICE_FATAL:
       // the above is device fatal error
       WARN("NET/IB : %s:%d async fatal event: %s", dev->devName, dev->portNum, str);
-      ncclIbDevFatalError(dev);
+      IbCastDevFatalError(dev);
       break;
     case IBV_EVENT_CQ_ERR:
       // the above is a CQ fatal error
       WARN("NET/IB : %s:%d async fatal event on CQ (%p): %s", dev->devName, dev->portNum, cq, str);
-      ncclIbCqFatalError(cq);
+      IbCastCqFatalError(cq);
       break;
     case IBV_EVENT_QP_FATAL:
     case IBV_EVENT_QP_REQ_ERR:
     case IBV_EVENT_QP_ACCESS_ERR:
       // the above are QP fatal errors
       WARN("NET/IB : %s:%d async fatal event on QP (%p): %s", dev->devName, dev->portNum, qp, str);
-      ncclIbQpFatalError(qp);
+      IbCastQpFatalError(qp);
       break;
     case IBV_EVENT_SRQ_ERR:
       // SRQ are not used in NCCL
@@ -183,7 +183,7 @@ void* IbCastAsyncThreadMain(void* args) {
 
 ncclResult_t rcclCastNetP2pPolicy(void* handle, int isP2p) {
   if (!handle) return ncclInvalidArgument;
-  struct ncclIbHandle* ibHandle = (struct ncclIbHandle*)handle;
+  struct IbCastHandle* ibHandle = (struct IbCastHandle*)handle;
   if (ibHandle->magic != NCCL_SOCKET_MAGIC) return ncclInvalidArgument;
   ibHandle->isP2p = isP2p;
   return ncclSuccess;

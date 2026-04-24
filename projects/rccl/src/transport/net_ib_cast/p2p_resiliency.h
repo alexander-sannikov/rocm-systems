@@ -11,24 +11,24 @@
 #include "net_ib_cast_common.h"
 #include "connect.h"
 
-enum ncclIbResiliencyDevState {
+enum IbCastResiliencyDevState {
   // The device is operating normally.
-  ncclIbResiliencyDevStateOk = 0,
+  IbCastResiliencyDevStateOk = 0,
   // The device encountered an error and and can be tried to be recovered.
-  ncclIbResiliencyDevStateError,
+  IbCastResiliencyDevStateError,
   // The device is currently undergoing recovery.
-  ncclIbResiliencyDevStateRecoveryInProgress,
+  IbCastResiliencyDevStateRecoveryInProgress,
   // The device recovery failed.
-  ncclIbResiliencyDevStateRecoveryFailed,
+  IbCastResiliencyDevStateRecoveryFailed,
   // The device was recovered.
-  ncclIbResiliencyDevStateRecovered,
+  IbCastResiliencyDevStateRecovered,
   // The device will not be attempted to be recovered any more.
-  ncclIbResiliencyDevStateErrorPermanent
+  IbCastResiliencyDevStateErrorPermanent
 };
 
-struct ncclIbResiliencyDev {
+struct IbCastResiliencyDev {
   // Atomic to allow lock-free access from multiple threads (main + recovery).
-  std::atomic<ncclIbResiliencyDevState> state;
+  std::atomic<IbCastResiliencyDevState> state;
   // CQ to get CQEs on the sender side for probing operations.
   // Receiver side is not expected to get any CQEs on the this CQ but Verbs
   // requires a CQ to be associated with a QP.
@@ -43,13 +43,13 @@ struct ncclIbResiliencyDev {
   struct ibv_cq* portRecoveryCq;
 };
 
-struct ncclIbResiliency {
+struct IbCastResiliency {
   // Back pointer to the base communicator.
-  struct ncclIbNetCommBase* baseComm;
+  struct IbCastNetCommBase* baseComm;
 
   bool recoveryEnabled;
 
-  struct ncclIbResiliencyDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastResiliencyDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
   int ndevs;
 
   // QPs used for probing of data transfers in case of QP/device failures.
@@ -61,7 +61,7 @@ struct ncclIbResiliency {
   // created to allow the remote side to connect to them and issue RDMA Read
   // operations through them but no local operations are performed on these
   // QPs.
-  struct ncclIbQp probingQps[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastQp probingQps[NCCL_IB_MAX_DEVS_PER_NIC];
   int nProbingQps;
 
   // As long as this variable is true, it means that resiliency operations are
@@ -73,25 +73,25 @@ struct ncclIbResiliency {
   int outstandingRequests;
 
   // QPs used for recovery protocol messages.
-  struct ncclIbQp portRecoveryQps[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastQp portRecoveryQps[NCCL_IB_MAX_DEVS_PER_NIC];
   int nPortRecoveryQps;
 
   // Number of outstanding devices that are currently undergoing recovery.
   int outstandingRecovery;
 };
 
-enum ncclIbResiliencyRequestSendState {
+enum IbCastResiliencyRequestSendState {
   // The request just encountered an error and waiting for probing to be
   // posted.
-  ncclIbResiliencyRequestStatePending = 0,
+  IbCastResiliencyRequestStatePending = 0,
   // A probe was posted for this request.
-  ncclIbResiliencyRequestStateProbePosted,
+  IbCastResiliencyRequestStateProbePosted,
   // The probe was completed. After this state, the request is either completed
   // or replayed.
-  ncclIbResiliencyRequestStateProbeCompleted
+  IbCastResiliencyRequestStateProbeCompleted
 };
 
-struct ncclIbResiliencyErrorInfo {
+struct IbCastResiliencyErrorInfo {
   // The index of the device on which the error occurred.
   int devIndex;
   // The time on which the error occurred. Can be used to verify if sufficient
@@ -101,10 +101,10 @@ struct ncclIbResiliencyErrorInfo {
 
 // Structure to hold information about a send request that encountered an
 // error.
-struct ncclIbResiliencyRequestSend {
-  enum ncclIbResiliencyRequestSendState state;
-  struct ncclIbRequest* request;
-  struct ncclIbResiliencyErrorInfo errorInfo;
+struct IbCastResiliencyRequestSend {
+  enum IbCastResiliencyRequestSendState state;
+  struct IbCastRequest* request;
+  struct IbCastResiliencyErrorInfo errorInfo;
   int failedAttempts;
 
   // It might be that an old CQE that belongs to a request that was already
@@ -114,15 +114,15 @@ struct ncclIbResiliencyRequestSend {
   uint64_t id;
 };
 
-struct ncclIbResiliencyRemoteCompletionRecordsInfo {
+struct IbCastResiliencyRemoteCompletionRecordsInfo {
   // The address of the completion records structure on the receiver side.
   uint64_t addr;
   // For accessing the completion records structure on the receiver side.
   uint32_t rkey;
 };
 
-struct ncclIbResiliencySend {
-  struct ncclIbResiliency base;
+struct IbCastResiliencySend {
+  struct IbCastResiliency base;
   // Array of requests that encountered an error. Requests in this array can be
   // waiting for probing and then possibly replay. Any request that encounters
   // an error is added to this array. The request is removed from this array
@@ -136,7 +136,7 @@ struct ncclIbResiliencySend {
   // but on the other hand, if there are requests here, it means that requests
   // are in a transient state and might be replayed over different devices.
   // At a "steady state" there should be no requests here.
-  struct ncclIbResiliencyRequestSend failedRequests[NET_IB_MAX_REQUESTS];
+  struct IbCastResiliencyRequestSend failedRequests[NET_IB_MAX_REQUESTS];
 
   // Stores the results of probe for this request
   // Note, this memory must be registered with an MR to allow RDMA Read
@@ -148,66 +148,66 @@ struct ncclIbResiliencySend {
 
   // Stores information, per-device, used to access the completion records
   // structure on the receiver side.
-  struct ncclIbResiliencyRemoteCompletionRecordsInfo remCmplRecordsInfo[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastResiliencyRemoteCompletionRecordsInfo remCmplRecordsInfo[NCCL_IB_MAX_DEVS_PER_NIC];
 };
 
 // -----------------------------
 // Data path APIs
 // -----------------------------
 
-ncclResult_t ncclIbResiliencyRequestIsComplete(struct ncclIbRequest *request, bool *isComplete);
+ncclResult_t IbCastResiliencyRequestIsComplete(struct IbCastRequest *request, bool *isComplete);
 
 // First checks if the error is recoverable or not. If yes, performs QPs
 // replacement on the communicator for all QPs that are associated
 // with the given device index and also initiates probing if needed.
 // Note: The error might occur on a "new" request or on a request that is
 // already waiting for a probe posting/completion or replay is already ongoing.
-ncclResult_t ncclIbResiliencyHandleCompletionError(struct ncclIbResiliency* resCtx, struct ibv_wc* wc, int devIndex);
+ncclResult_t IbCastResiliencyHandleCompletionError(struct IbCastResiliency* resCtx, struct ibv_wc* wc, int devIndex);
 
 // Progresses all operations on the resiliency context.
-ncclResult_t ncclIbResiliencyProgress(struct ncclIbResiliency* resCtx);
+ncclResult_t IbCastResiliencyProgress(struct IbCastResiliency* resCtx);
 
 // -----------------------------
 // Control path APIs
 // -----------------------------
 
 // Initializes/Destroys the resiliency context.
-ncclResult_t ncclIbResiliencyInit(struct ncclIbNetCommBase* baseComm, struct ncclIbResiliency** resCtx);
-ncclResult_t ncclIbResiliencyDestroy(struct ncclIbResiliency** resCtx);
+ncclResult_t IbCastResiliencyInit(struct IbCastNetCommBase* baseComm, struct IbCastResiliency** resCtx);
+ncclResult_t IbCastResiliencyDestroy(struct IbCastResiliency** resCtx);
 
 // Initializes/Destroys device-related resources.
-ncclResult_t ncclIbResiliencyDevInit(struct ncclIbResiliency* resCtx, uint devIndex, ncclIbDev* ibDev);
-ncclResult_t ncclIbResiliencyDevDestroy(struct ncclIbResiliency* resCtx, uint devIndex);
+ncclResult_t IbCastResiliencyDevInit(struct IbCastResiliency* resCtx, uint devIndex, IbCastDev* ibDev);
+ncclResult_t IbCastResiliencyDevDestroy(struct IbCastResiliency* resCtx, uint devIndex);
 
 // Gets the size of the CQ that is associated with the data QPs. This CQ size
 // accomodates the number of devices that are supported for failover.
-ncclResult_t ncclIbResiliencyDataCqSizeGet(struct ncclIbResiliency* resCtx, uint devIndex, int* cqSize);
+ncclResult_t IbCastResiliencyDataCqSizeGet(struct IbCastResiliency* resCtx, uint devIndex, int* cqSize);
 // Gets the size of the Receive Queue (RQ) that is expected to receive data.
 // The RQ size accomodates the number of devices that are supported for
 // failover.
-ncclResult_t ncclIbResiliencyDataRqSizeGet(struct ncclIbResiliency* resCtx, uint devIndex, uint32_t* rqSize);
+ncclResult_t IbCastResiliencyDataRqSizeGet(struct IbCastResiliency* resCtx, uint devIndex, uint32_t* rqSize);
 
 // Set the number of local devices and remote devices for the resiliency
 // context. This function must be called BEFORE creating the resiliency QPs
-ncclResult_t ncclIbResiliencyDeviceNumSet(struct ncclIbResiliency* resCtx, int nLocalDevs, int nRemDevs);
+ncclResult_t IbCastResiliencyDeviceNumSet(struct IbCastResiliency* resCtx, int nLocalDevs, int nRemDevs);
 
 // The local info should be populated by the function with the information of
 // the QPs created so it could be passed to the receiver side.
-ncclResult_t ncclIbResiliencySenderCreateQps(struct ncclIbResiliency* resCtx, struct ncclIbResiliencyInfo* localResiliencyInfo);
+ncclResult_t IbCastResiliencySenderCreateQps(struct IbCastResiliency* resCtx, struct IbCastResiliencyInfo* localResiliencyInfo);
 // The remote info should be used for modifying the QPs required for resiliency
 // on the sender side to RTS state.
-ncclResult_t ncclIbResiliencySenderQpsToRts(struct ncclIbResiliency* resCtx, struct ncclIbConnectionMetadata* remInfo);
+ncclResult_t IbCastResiliencySenderQpsToRts(struct IbCastResiliency* resCtx, struct IbCastConnectionMetadata* remInfo);
 // The local info should be populated with the information of the QPs created
 // so it could be passed to the sender side.
-ncclResult_t ncclIbResiliencyReceiverQpsCreateToRts(struct ncclIbResiliency* resCtx, struct ncclIbConnectionMetadata* remInfo, struct ncclIbResiliencyInfo* localResiliencyInfo);
+ncclResult_t IbCastResiliencyReceiverQpsCreateToRts(struct IbCastResiliency* resCtx, struct IbCastConnectionMetadata* remInfo, struct IbCastResiliencyInfo* localResiliencyInfo);
 
-ncclResult_t ncclIbResiliencyClose(struct ncclIbResiliency* resCtx);
+ncclResult_t IbCastResiliencyClose(struct IbCastResiliency* resCtx);
 
 // Allow resiliency context to reuse the memory registration
 // Receiver side registers the memory for completion records and sends the
 // memory info to the sender side. This function should be called on the sender
 // side to allow the resiliency context to access the completion records
 // structure on the receiver side.
-ncclResult_t ncclIbResiliencyRemoteCompletionRecordsSet(struct ncclIbResiliency* resCtx, uint32_t cmplsRecordsRkey, uint64_t cmplsRecordsAddr, uint devIndex);
+ncclResult_t IbCastResiliencyRemoteCompletionRecordsSet(struct IbCastResiliency* resCtx, uint32_t cmplsRecordsRkey, uint64_t cmplsRecordsAddr, uint devIndex);
 
 #endif // NET_IB_P2P_RESILIENCY_H_

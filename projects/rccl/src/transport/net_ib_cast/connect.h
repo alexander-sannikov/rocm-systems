@@ -11,7 +11,7 @@
 #include "net_ib_cast_common.h"
 #include "ibvwrap.h"
 
-struct ncclIbQpCreateAttr {
+struct IbCastQpCreateAttr {
   void* qpContext;
   enum ibv_qp_type type;
   bool oooRq;
@@ -22,7 +22,7 @@ struct ncclIbQpCreateAttr {
 };
 
 // Per-QP connection metatdata
-struct ncclIbQpInfo {
+struct IbCastQpInfo {
   uint32_t qpn;
 
   // Fields needed for ece (enhanced connection establishment)
@@ -35,11 +35,11 @@ struct ncclIbQpInfo {
   int devIndex;
 };
 
-struct ncclIbResiliencyInfo {
+struct IbCastResiliencyInfo {
   // QPs used for probing of data transfers in case of QP/device failures.
-  struct ncclIbQpInfo probingQpsInfo[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastQpInfo probingQpsInfo[NCCL_IB_MAX_DEVS_PER_NIC];
   // QPs used for recovery protocol after QP/device failures.
-  struct ncclIbQpInfo portRecoveryQpsInfo[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastQpInfo portRecoveryQpsInfo[NCCL_IB_MAX_DEVS_PER_NIC];
 };
 
 // Structure used to hold information needed to establish the communication
@@ -48,13 +48,13 @@ struct ncclIbResiliencyInfo {
 // populated by each side of the connection before being sent to the remote
 // peer. The remote peer uses the information passed to it from its peer to
 // create and initialize its local resources.
-struct ncclIbConnectionMetadata {
-  struct ncclIbQpInfo qpInfo[NCCL_IB_MAX_QPS];
-  struct ncclIbResiliencyInfo resiliencyInfo;
-  struct ncclIbDevInfo devs[NCCL_IB_MAX_DEVS_PER_NIC];
+struct IbCastConnectionMetadata {
+  struct IbCastQpInfo qpInfo[NCCL_IB_MAX_QPS];
+  struct IbCastResiliencyInfo resiliencyInfo;
+  struct IbCastDevInfo devs[NCCL_IB_MAX_DEVS_PER_NIC];
   char devName[MAX_MERGED_DEV_NAME];
   // An address for a registered memory to be accessed by the peer. The address
-  // can be accessed using RDMA using the key specified in ncclIbDevInfo::rkey.
+  // can be accessed using RDMA using the key specified in IbCastDevInfo::rkey.
   // The sender side gets in this member, from the receiver, the address of the
   // memory to which the sender writes the sizes of the data transfers that
   // the sender sends.
@@ -67,47 +67,47 @@ struct ncclIbConnectionMetadata {
   int isP2p;
 };
 
-enum ncclIbCommState {
-  ncclIbCommStateStart = 0,
-  ncclIbCommStateConnect = 1,
-  ncclIbCommStateAccept = 3,
-  ncclIbCommStateSend = 4,
-  ncclIbCommStateRecv = 5,
-  ncclIbCommStateConnecting = 6,
-  ncclIbCommStateConnected = 7,
-  ncclIbCommStatePendingReady = 8,
-  ncclIbCommStateSendDevList = 9,
-  ncclIbCommStateRecvDevList = 10,
+enum IbCastCommState {
+  IbCastCommStateStart = 0,
+  IbCastCommStateConnect = 1,
+  IbCastCommStateAccept = 3,
+  IbCastCommStateSend = 4,
+  IbCastCommStateRecv = 5,
+  IbCastCommStateConnecting = 6,
+  IbCastCommStateConnected = 7,
+  IbCastCommStatePendingReady = 8,
+  IbCastCommStateSendDevList = 9,
+  IbCastCommStateRecvDevList = 10,
 };
 
-struct ncclIbCommStage {
-  enum ncclIbCommState state;
+struct IbCastCommStage {
+  enum IbCastCommState state;
   int offset;
   void* buffer;
   void* comm;
 };
 
-struct ncclIbHandle {
+struct IbCastHandle {
   union ncclSocketAddress connectAddr;
   uint64_t magic;
-  struct ncclIbCommStage stage;
+  struct IbCastCommStage stage;
   int isP2p;
 };
 
-ncclResult_t ncclIbQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* createQpAttrs);
-ncclResult_t ncclIbQpInit(struct ncclIbQp* qp);
-ncclResult_t ncclIbQpRtr(struct ncclIbQp* qp);
-ncclResult_t ncclIbQpRts(struct ncclIbQp* qp);
-ncclResult_t ncclIbQpReset(struct ncclIbQp* qp);
-ncclResult_t ncclIbQpError(struct ncclIbQp* qp);
+ncclResult_t IbCastQpCreate(struct IbCastQp* qp, struct IbCastQpCreateAttr* createQpAttrs);
+ncclResult_t IbCastQpInit(struct IbCastQp* qp);
+ncclResult_t IbCastQpRtr(struct IbCastQp* qp);
+ncclResult_t IbCastQpRts(struct IbCastQp* qp);
+ncclResult_t IbCastQpReset(struct IbCastQp* qp);
+ncclResult_t IbCastQpError(struct IbCastQp* qp);
 
-ncclResult_t IbCastCreateQp(uint8_t ib_port, struct ncclIbNetCommDevBase* base,
-                             int access_flags, void* qp_context, struct ncclIbQp* qp,
+ncclResult_t IbCastCreateQp(uint8_t ib_port, struct IbCastNetCommDevBase* base,
+                             int access_flags, void* qp_context, struct IbCastQp* qp,
                              int channel_id, bool data_qp, int8_t cts_qp_slot);
-ncclResult_t IbCastRtrQp(struct ibv_qp* qp, struct ncclIbGidInfo* sGidInfo, uint32_t dest_qp_num,
-                          struct ncclIbDevInfo* info, bool fifoTc, int tc, int sl);
+ncclResult_t IbCastRtrQp(struct ibv_qp* qp, struct IbCastGidInfo* sGidInfo, uint32_t dest_qp_num,
+                          struct IbCastDevInfo* info, bool fifoTc, int tc, int sl);
 ncclResult_t IbCastRtsQp(struct ibv_qp* qp);
 
-ncclResult_t ncclIbPostReceiveWorkRequestsOnQp(struct ncclIbRecvComm* recvComm, ncclIbQp* dataQp);
+ncclResult_t IbCastPostReceiveWorkRequestsOnQp(struct IbCastRecvComm* recvComm, IbCastQp* dataQp);
 
 #endif // NET_IB_CONNECT_H_

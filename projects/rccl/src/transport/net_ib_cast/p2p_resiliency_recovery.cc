@@ -32,13 +32,13 @@ extern int64_t ncclParamIbPkey();
 #define NCCL_IB_RESILIENCY_PORT_RECOVERY_CQ_SIZE (NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX*2)
 
 // Asynchronous thread to handle port recovery operations
-std::thread ncclIbPortRecoveryAsyncThread;
+std::thread IbCastPortRecoveryAsyncThread;
 
 // Reference count of active resiliency contexts using port recovery
-static std::atomic<int> ncclIbPortRecoveryRefCount(0);
+static std::atomic<int> IbCastPortRecoveryRefCount(0);
 
-// Flag indicating the recovery thread is active - cleared by ncclIbPortRecoveryThreadStop() to signal the async thread to exit
-static std::atomic<bool> ncclIbPortRecoveryThreadActive(false);
+// Flag indicating the recovery thread is active - cleared by IbCastPortRecoveryThreadStop() to signal the async thread to exit
+static std::atomic<bool> IbCastPortRecoveryThreadActive(false);
 
 // Mutex protecting shared state between the async recovery thread and callers:
 // - recoveryInbox: shared list where producers add new failed devices to be
@@ -52,32 +52,32 @@ static std::atomic<bool> ncclIbPortRecoveryThreadActive(false);
 // while preventing data races on the shared inbox.
 //
 // closeReq->completed must be set under the lock to prevent a lost-wakeup
-// race on ncclIbPortRecoveryCloseCond: the closing thread could evaluate the
+// race on IbCastPortRecoveryCloseCond: the closing thread could evaluate the
 // wait predicate (false), then the async thread sets completed and notifies,
 // then the closing thread sleeps on the condvar and never wakes.
 //
 // Usage pattern:
-// 1. ncclIbPortRecoveryHandleFailure: acquires lock to push to recoveryInbox
-// 2. ncclIbPortRecoveryClose: acquires lock to add close request, then waits on ncclIbPortRecoveryCloseCond
-// 3. ncclIbPortRecoveryAsyncThreadMain: acquires lock to splice inbox, swap close requests;
+// 1. IbCastPortRecoveryHandleFailure: acquires lock to push to recoveryInbox
+// 2. IbCastPortRecoveryClose: acquires lock to add close request, then waits on IbCastPortRecoveryCloseCond
+// 3. IbCastPortRecoveryAsyncThreadMain: acquires lock to splice inbox, swap close requests;
 //    processes both outside the lock; re-acquires lock to set completed and notify
-static std::mutex ncclIbPortRecoveryMutex;
-static std::condition_variable ncclIbPortRecoveryCond;
+static std::mutex IbCastPortRecoveryMutex;
+static std::condition_variable IbCastPortRecoveryCond;
 
-struct ncclIbPortRecoveryCloseRequest {
-  struct ncclIbResiliency* resCtx;
+struct IbCastPortRecoveryCloseRequest {
+  struct IbCastResiliency* resCtx;
   bool completed;
 };
 
-// Shared vector of close requests - protected by ncclIbPortRecoveryMutex
-static std::vector<ncclIbPortRecoveryCloseRequest*> recoveryCloseRequests;
+// Shared vector of close requests - protected by IbCastPortRecoveryMutex
+static std::vector<IbCastPortRecoveryCloseRequest*> recoveryCloseRequests;
 // Condition variable to signal completion of close requests
-static std::condition_variable ncclIbPortRecoveryCloseCond;
+static std::condition_variable IbCastPortRecoveryCloseCond;
 
-enum ncclIbPortRecoveryState {
+enum IbCastPortRecoveryState {
   // Recovery protocol has not started yet. Before moving to the next state,
   // the "data CQs" and "data QPs" of the failed device should be drained.
-  ncclIbPortRecoveryStateInit,
+  IbCastPortRecoveryStateInit,
   // On the requestor's side: The requestor posts "alive" messages and
   // responder receives them. After posting a batch of "alive" messages, and
   // waiting for their local completion, the requestor transitions to the "peer
@@ -89,7 +89,7 @@ enum ncclIbPortRecoveryState {
   // for the "ack" to complete locally. If the responder does not receive a
   // consecutive sequence of "alive" messages, it replays this state and waits
   // for more "alive" messages.
-  ncclIbPortRecoveryStateAliveMessages,
+  IbCastPortRecoveryStateAliveMessages,
   // On the requestor's side: The requestor is waiting to receive an "ack" from
   // the responder. After receiving the "ack" message from the responder, the
   // requestor posts the "final ack" message to the responder and waits for its
@@ -100,21 +100,21 @@ enum ncclIbPortRecoveryState {
   // concludes the recovery protocol and determines the port has recovered.
   // If a "final ack" is not received within some time window, the responder
   // goes back to the "alive messages" state.
-  ncclIbPortRecoveryStateAck,
+  IbCastPortRecoveryStateAck,
   // This state represents a state where the failed device has completed the
   // recovery protocol successfully, "data QPs" were restored and and sender
   // and receiver can now resume posting new work requests using on the device.
-  ncclIbPortRecoveryStateSuccess,
+  IbCastPortRecoveryStateSuccess,
   // This state represents a state where the failed device could not be
   // recovered.
-  ncclIbPortRecoveryStateFailed,
+  IbCastPortRecoveryStateFailed,
 };
 
-struct ncclIbPortRecoveryContext {
-  struct ncclIbResiliency* resCtx;
+struct IbCastPortRecoveryContext {
+  struct IbCastResiliency* resCtx;
   // The index of the device that is recovered.
   int devIndex;
-  enum ncclIbPortRecoveryState state;
+  enum IbCastPortRecoveryState state;
 
   struct ibv_cq* recoveryCq;
 
@@ -147,20 +147,20 @@ struct ncclIbPortRecoveryContext {
   };
 };
 
-// Shared inbox for new recovery contexts - protected by ncclIbPortRecoveryMutex.
+// Shared inbox for new recovery contexts - protected by IbCastPortRecoveryMutex.
 // Producer threads add items here; the async thread drains it under lock.
-static std::list<ncclIbPortRecoveryContext*> recoveryInbox;
+static std::list<IbCastPortRecoveryContext*> recoveryInbox;
 
-static inline ncclResult_t ncclIbPortRecoveryQpsToError(ncclIbPortRecoveryContext* recoveryContext) {
+static inline ncclResult_t IbCastPortRecoveryQpsToError(IbCastPortRecoveryContext* recoveryContext) {
   uint nqps = recoveryContext->resCtx->baseComm->nqps;
   for (int qpIndex = 0; qpIndex < nqps; qpIndex++) {
-    ncclIbQp* localQp = &recoveryContext->resCtx->baseComm->qps[qpIndex];
+    IbCastQp* localQp = &recoveryContext->resCtx->baseComm->qps[qpIndex];
     if (localQp->devIndex != recoveryContext->devIndex) {
       // The QP is not on the failed device; skip
       continue;
     }
     INFO(NCCL_NET, "NET/IB: %s: Transitioning QP %u on device %d to ERROR state (comm=%p, devIndex=%d, qp_num=%u)", __func__, localQp->qp->qp_num, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
-    NCCLCHECK(ncclIbQpError(localQp));
+    NCCLCHECK(IbCastQpError(localQp));
   }
   return ncclSuccess;
 }
@@ -168,21 +168,21 @@ static inline ncclResult_t ncclIbPortRecoveryQpsToError(ncclIbPortRecoveryContex
 // Predefined work ID for receive work request for port recovery messages
 #define NCCL_IB_PORT_RECOVERY_WR_ID (0xAAAA)
 
-static struct ibv_recv_wr ncclIbResiliencyPortRecoveryRecvWr = {
+static struct ibv_recv_wr IbCastResiliencyPortRecoveryRecvWr = {
     .wr_id = NCCL_IB_PORT_RECOVERY_WR_ID,
     .next = NULL,
     .sg_list = NULL,
     .num_sge = 0
 };
 
-inline static ncclResult_t ncclIbPortRecoveryPostRecvWorkRequest(struct ibv_qp* qp) {
+inline static ncclResult_t IbCastPortRecoveryPostRecvWorkRequest(struct ibv_qp* qp) {
   struct ibv_recv_wr* bad_wr;
-  return wrap_ibv_post_recv(qp, &ncclIbResiliencyPortRecoveryRecvWr, &bad_wr);
+  return wrap_ibv_post_recv(qp, &IbCastResiliencyPortRecoveryRecvWr, &bad_wr);
 }
 
 // Helper function to drain CQEs on the provided CQ and fill a Receive WQE for
 // every CQE drained on the provided QP.
-static ncclResult_t ncclIbPortRecoveryDrainCqAndPostReceiveWRs(struct ncclIbPortRecoveryContext* recoveryContext, bool* success) {
+static ncclResult_t IbCastPortRecoveryDrainCqAndPostReceiveWRs(struct IbCastPortRecoveryContext* recoveryContext, bool* success) {
   struct ibv_cq* cq = recoveryContext->recoveryCq;
   struct ibv_qp* qp = recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp;
   int wrDone = 0;
@@ -199,7 +199,7 @@ static ncclResult_t ncclIbPortRecoveryDrainCqAndPostReceiveWRs(struct ncclIbPort
     }
     INFO(NCCL_NET, "NET/IB: %s: Drained %d CQEs from recovery CQ %p for device %d (comm=%p)", __func__, wrDone, cq, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
     for (int i = 0; i < wrDone; i++) {
-      ret = ncclIbPortRecoveryPostRecvWorkRequest(qp);
+      ret = IbCastPortRecoveryPostRecvWorkRequest(qp);
       if (ret != ncclSuccess) {
         INFO(NCCL_NET, "NET/IB: %s: Failed to post recv WR on recovery QP %p for device %d (comm=%p)", __func__, qp, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
         *success = false;
@@ -211,10 +211,10 @@ static ncclResult_t ncclIbPortRecoveryDrainCqAndPostReceiveWRs(struct ncclIbPort
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryContextInit(struct ncclIbResiliency* resCtx, int failedDevIndex, ncclIbPortRecoveryContext** outRecoveryCtx) {
+static inline ncclResult_t IbCastPortRecoveryContextInit(struct IbCastResiliency* resCtx, int failedDevIndex, IbCastPortRecoveryContext** outRecoveryCtx) {
   ncclResult_t res = ncclSuccess;
   if (!outRecoveryCtx) return ncclInternalError;
-  ncclIbPortRecoveryContext* recoveryCtx = (ncclIbPortRecoveryContext*)malloc(sizeof(ncclIbPortRecoveryContext));
+  IbCastPortRecoveryContext* recoveryCtx = (IbCastPortRecoveryContext*)malloc(sizeof(IbCastPortRecoveryContext));
   if (!recoveryCtx) {
     WARN("NET/IB: %s: Failed to allocate failure queue node (comm=%p)", __func__, resCtx->baseComm);
     *outRecoveryCtx = NULL;
@@ -224,10 +224,10 @@ static inline ncclResult_t ncclIbPortRecoveryContextInit(struct ncclIbResiliency
   *outRecoveryCtx = NULL;
 
   // Initialize all fields
-  memset(recoveryCtx, 0, sizeof(ncclIbPortRecoveryContext));
+  memset(recoveryCtx, 0, sizeof(IbCastPortRecoveryContext));
   recoveryCtx->resCtx = resCtx;
   recoveryCtx->devIndex = failedDevIndex;
-  recoveryCtx->state = ncclIbPortRecoveryStateInit;
+  recoveryCtx->state = IbCastPortRecoveryStateInit;
   recoveryCtx->timeInit = clockNano();
   recoveryCtx->nFailedAttempts = 0;
   recoveryCtx->timeLastMsg = 0;
@@ -243,7 +243,7 @@ static inline ncclResult_t ncclIbPortRecoveryContextInit(struct ncclIbResiliency
   }
 
   // Transitioning all QPs on the failed device to ERROR state
-  res = ncclIbPortRecoveryQpsToError(recoveryCtx);
+  res = IbCastPortRecoveryQpsToError(recoveryCtx);
   if (res != ncclSuccess) {
     INFO(NCCL_NET, "NET/IB: %s: Failed to transition QPs to ERROR state for device %d (comm=%p)", __func__, failedDevIndex, resCtx->baseComm);
     free(recoveryCtx);
@@ -255,7 +255,7 @@ static inline ncclResult_t ncclIbPortRecoveryContextInit(struct ncclIbResiliency
     recoveryCtx->send.aliveMsgCompleted = false;
     // Required for the ACK from the receiver
     INFO(NCCL_NET, "NET/IB: %s: Sender posting initial (%d) recv WRs for port recovery for device %d (comm=%p)", __func__, 1, recoveryCtx->devIndex, recoveryCtx->resCtx->baseComm);
-    res = ncclIbPortRecoveryPostRecvWorkRequest(recoveryCtx->resCtx->portRecoveryQps[recoveryCtx->devIndex].qp);
+    res = IbCastPortRecoveryPostRecvWorkRequest(recoveryCtx->resCtx->portRecoveryQps[recoveryCtx->devIndex].qp);
     if (res != ncclSuccess) {
       INFO(NCCL_NET, "NET/IB: %s: Sender failed to post recv WR on recovery QP for device %d (comm=%p)", __func__, recoveryCtx->devIndex, recoveryCtx->resCtx->baseComm);
       free(recoveryCtx);
@@ -266,7 +266,7 @@ static inline ncclResult_t ncclIbPortRecoveryContextInit(struct ncclIbResiliency
     // Required for the alive messages and final ACK from the sender
     INFO(NCCL_NET, "NET/IB: %s: Receiver posting initial (%d) recv WRs for port recovery for device %d (comm=%p)", __func__, NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX, recoveryCtx->devIndex, recoveryCtx->resCtx->baseComm);
     for (int i = 0; i < NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX; i++) {
-      res = ncclIbPortRecoveryPostRecvWorkRequest(recoveryCtx->resCtx->portRecoveryQps[recoveryCtx->devIndex].qp);
+      res = IbCastPortRecoveryPostRecvWorkRequest(recoveryCtx->resCtx->portRecoveryQps[recoveryCtx->devIndex].qp);
       if (res != ncclSuccess) {
         INFO(NCCL_NET, "NET/IB: %s: Receiver failed to post recv WR on recovery QP for device %d (comm=%p)", __func__, recoveryCtx->devIndex, recoveryCtx->resCtx->baseComm);
         free(recoveryCtx);
@@ -279,24 +279,24 @@ static inline ncclResult_t ncclIbPortRecoveryContextInit(struct ncclIbResiliency
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryContextDestroy(ncclIbPortRecoveryContext* recoveryContext) {
+static inline ncclResult_t IbCastPortRecoveryContextDestroy(IbCastPortRecoveryContext* recoveryContext) {
   assert(recoveryContext);
   INFO(NCCL_NET, "NET/IB: %s: Destroying port recovery context for device %d (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
   free(recoveryContext);
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryDevInit(struct ncclIbResiliency* resCtx, int devIndex, ncclIbDev* ibDev) {
+ncclResult_t IbCastPortRecoveryDevInit(struct IbCastResiliency* resCtx, int devIndex, IbCastDev* ibDev) {
   assert(resCtx->recoveryEnabled);
-  struct ncclIbResiliencyDev* resDev = &resCtx->devs[devIndex];
+  struct IbCastResiliencyDev* resDev = &resCtx->devs[devIndex];
   void* cqContext = (void*)&resCtx->baseComm->stats;
   INFO(NCCL_NET, "NET/IB: %s: Created port recovery CQ is enabled for resiliency context (%s comm=%p) on device %d", __func__, resCtx->baseComm->isSend ? "send" : "recv", resCtx->baseComm, devIndex);
   NCCLCHECK(wrap_ibv_create_cq(&resDev->portRecoveryCq, ibDev->context, NCCL_IB_RESILIENCY_PORT_RECOVERY_CQ_SIZE, cqContext, NULL, 0));
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryDevDestroy(struct ncclIbResiliency* resCtx, int devIndex) {
-  struct ncclIbResiliencyDev* resDev = &resCtx->devs[devIndex];
+ncclResult_t IbCastPortRecoveryDevDestroy(struct IbCastResiliency* resCtx, int devIndex) {
+  struct IbCastResiliencyDev* resDev = &resCtx->devs[devIndex];
   if (resDev->portRecoveryCq) {
     NCCLCHECK(wrap_ibv_destroy_cq(resDev->portRecoveryCq));
   }
@@ -304,61 +304,61 @@ ncclResult_t ncclIbPortRecoveryDevDestroy(struct ncclIbResiliency* resCtx, int d
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoverySenderQpsCreate(struct ncclIbResiliency* resCtx, struct ncclIbQpInfo* localPortRecoveryQpsInfo, int nQps) {
+ncclResult_t IbCastPortRecoverySenderQpsCreate(struct IbCastResiliency* resCtx, struct IbCastQpInfo* localPortRecoveryQpsInfo, int nQps) {
   assert(nQps > 0);
   assert(resCtx->recoveryEnabled);
-  ncclIbSendComm* sendComm = (ncclIbSendComm*)resCtx->baseComm;
+  IbCastSendComm* sendComm = (IbCastSendComm*)resCtx->baseComm;
   void* qpContext = (void*)&sendComm->base.stats;
-  struct ncclIbQpCreateAttr qpCreateAttrs;
+  struct IbCastQpCreateAttr qpCreateAttrs;
   memset(&qpCreateAttrs, 0, sizeof(qpCreateAttrs));
   qpCreateAttrs.type = IBV_QPT_UC;
   qpCreateAttrs.maxRecvWorkRequest = 1;
   qpCreateAttrs.maxSendWorkRequest = NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX;
   for (int localQpIndex = 0; localQpIndex < nQps; localQpIndex++) {
     int localDevIndex = localQpIndex % sendComm->base.vProps.ndevs;
-    ncclIbSendCommDev* sendCommDev = &sendComm->devs[localDevIndex];
-    ncclIbDev* ibDev = &ncclIbDevs[sendCommDev->base.ibDevN];
-    ncclIbQp* localQp = &resCtx->portRecoveryQps[localQpIndex];
+    IbCastSendCommDev* sendCommDev = &sendComm->devs[localDevIndex];
+    IbCastDev* ibDev = &IbCastDevs[sendCommDev->base.ibDevN];
+    IbCastQp* localQp = &resCtx->portRecoveryQps[localQpIndex];
     qpCreateAttrs.cq = resCtx->devs[localDevIndex].portRecoveryCq;
     qpCreateAttrs.pd = sendCommDev->base.pd;
     qpCreateAttrs.qpContext = qpContext;
-    NCCLCHECK(ncclIbQpCreate(localQp, &qpCreateAttrs));
+    NCCLCHECK(IbCastQpCreate(localQp, &qpCreateAttrs));
     // Populate the info that will be delivered to the remote receiver peer
-    ncclIbQpInfo* localQpInfo = &localPortRecoveryQpsInfo[localQpIndex];
+    IbCastQpInfo* localQpInfo = &localPortRecoveryQpsInfo[localQpIndex];
     localQpInfo->qpn = localQp->qp->qp_num;
     localQpInfo->devIndex = localDevIndex;
 
     // Transition the QP to INIT state
-    struct ncclIbQpInitAttr* initAttr = &localQp->initAttr;
+    struct IbCastQpInitAttr* initAttr = &localQp->initAttr;
     initAttr->state = IBV_QPS_INIT;
     initAttr->pkeyIndex = ncclParamIbPkey();
     initAttr->portNum = ibDev->portNum;
     // Recovery QPs on the sender side do not require any remote permissions.
     initAttr->qpAccessFlags = IBV_ACCESS_LOCAL_WRITE;
-    NCCLCHECK(ncclIbQpInit(localQp));
+    NCCLCHECK(IbCastQpInit(localQp));
   }
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoverySenderQpsToRts(struct ncclIbResiliency* resCtx, struct ncclIbConnectionMetadata* remInfo, int nQps) {
+ncclResult_t IbCastPortRecoverySenderQpsToRts(struct IbCastResiliency* resCtx, struct IbCastConnectionMetadata* remInfo, int nQps) {
   assert(nQps > 0);
   assert(resCtx->recoveryEnabled);
-  ncclIbSendComm* sendComm = (ncclIbSendComm*)resCtx->baseComm;
-  ncclIbQp* localQp = NULL;
-  ncclIbQpInfo* remQpInfo = NULL;
+  IbCastSendComm* sendComm = (IbCastSendComm*)resCtx->baseComm;
+  IbCastQp* localQp = NULL;
+  IbCastQpInfo* remQpInfo = NULL;
   for (int localQpIndex = 0; localQpIndex < nQps; localQpIndex++) {
     int localDevIndex = localQpIndex % sendComm->base.vProps.ndevs;;
-    ncclIbSendCommDev* sendCommDev = &sendComm->devs[localDevIndex];
-    ncclIbDev* ibDev = &ncclIbDevs[sendCommDev->base.ibDevN];
+    IbCastSendCommDev* sendCommDev = &sendComm->devs[localDevIndex];
+    IbCastDev* ibDev = &IbCastDevs[sendCommDev->base.ibDevN];
     localQp = &resCtx->portRecoveryQps[localQpIndex];
     remQpInfo = &(remInfo->resiliencyInfo.portRecoveryQpsInfo[localQpIndex]);
     localQp->remDevIdx = remQpInfo->devIndex;
     // It might be that the remote side has a different number of devices, so
     // finding the correct remote device information is done by checking the
     // remote QP info.
-    ncclIbDevInfo* remDevInfo = &remInfo->devs[remQpInfo->devIndex];
+    IbCastDevInfo* remDevInfo = &remInfo->devs[remQpInfo->devIndex];
 
-    struct ncclIbQpRtrAttr* rtrAttr = &localQp->rtrAttr;
+    struct IbCastQpRtrAttr* rtrAttr = &localQp->rtrAttr;
     rtrAttr->mtu = std::min(remDevInfo->mtu, ibDev->portAttr.active_mtu);
     rtrAttr->linkLayer = remDevInfo->link_layer;
     rtrAttr->tc = (remDevInfo->link_layer == IBV_LINK_LAYER_ETHERNET) ? remInfo->tc : -1;
@@ -369,36 +369,36 @@ ncclResult_t ncclIbPortRecoverySenderQpsToRts(struct ncclIbResiliency* resCtx, s
     rtrAttr->localIbPort = remDevInfo->ib_port;
     rtrAttr->localGid = sendCommDev->base.gidInfo.localGid;
     rtrAttr->localGidIndex = sendCommDev->base.gidInfo.localGidIndex;
-    NCCLCHECK(ncclIbQpRtr(localQp));
+    NCCLCHECK(IbCastQpRtr(localQp));
 
-    NCCLCHECK(ncclIbQpRts(localQp));
+    NCCLCHECK(IbCastQpRts(localQp));
     INFO(NCCL_NET, "NET/IB: %s: To RTS done on recovery QP (index=%d, qp_num=%u, dest_qp_num=%u, deviceIndex=%d, comm=%p)", __func__, localQpIndex, localQp->qp->qp_num, rtrAttr->remoteQpNum, localDevIndex, resCtx->baseComm);
   }
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryReceiverQpsCreateToRts(struct ncclIbResiliency* resCtx, struct ncclIbConnectionMetadata* remInfo, struct ncclIbQpInfo* localPortRecoveryQpsInfo, int nQps) {
-  ncclIbRecvComm* recvComm = (ncclIbRecvComm*)resCtx->baseComm;
+ncclResult_t IbCastPortRecoveryReceiverQpsCreateToRts(struct IbCastResiliency* resCtx, struct IbCastConnectionMetadata* remInfo, struct IbCastQpInfo* localPortRecoveryQpsInfo, int nQps) {
+  IbCastRecvComm* recvComm = (IbCastRecvComm*)resCtx->baseComm;
   void* qpContext = (void*)&recvComm->base.stats;
-  struct ncclIbQpCreateAttr qpCreateAttrs;
+  struct IbCastQpCreateAttr qpCreateAttrs;
   memset(&qpCreateAttrs, 0, sizeof(qpCreateAttrs));
   qpCreateAttrs.type = IBV_QPT_UC;
   qpCreateAttrs.maxRecvWorkRequest = NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX;
   qpCreateAttrs.maxSendWorkRequest = 1;
   for (int localQpIndex = 0; localQpIndex < nQps; localQpIndex++) {
     int localDevIndex = localQpIndex % recvComm->base.vProps.ndevs;
-    ncclIbRecvCommDev* recvCommDev = &recvComm->devs[localDevIndex];
-    ncclIbDev* ibDev = &ncclIbDevs[recvCommDev->base.ibDevN];
-    ncclIbQp* localQp = &resCtx->portRecoveryQps[localQpIndex];
+    IbCastRecvCommDev* recvCommDev = &recvComm->devs[localDevIndex];
+    IbCastDev* ibDev = &IbCastDevs[recvCommDev->base.ibDevN];
+    IbCastQp* localQp = &resCtx->portRecoveryQps[localQpIndex];
     qpCreateAttrs.cq = resCtx->devs[localDevIndex].portRecoveryCq;
     qpCreateAttrs.pd = recvCommDev->base.pd;
     qpCreateAttrs.qpContext = qpContext;
-    NCCLCHECK(ncclIbQpCreate(localQp, &qpCreateAttrs));
+    NCCLCHECK(IbCastQpCreate(localQp, &qpCreateAttrs));
     localPortRecoveryQpsInfo[localQpIndex].qpn = localQp->qp->qp_num;
     localPortRecoveryQpsInfo[localQpIndex].devIndex = localDevIndex;
 
     // Transition the QP to INIT state
-    struct ncclIbQpInitAttr* initAttr = &localQp->initAttr;
+    struct IbCastQpInitAttr* initAttr = &localQp->initAttr;
     initAttr->state = IBV_QPS_INIT;
     initAttr->pkeyIndex = ncclParamIbPkey();
     initAttr->portNum = ibDev->portNum;
@@ -406,12 +406,12 @@ ncclResult_t ncclIbPortRecoveryReceiverQpsCreateToRts(struct ncclIbResiliency* r
     // Sender is expected to only use RDMA Send with Immediate operations
     // to send alive messages to the receiver.
     initAttr->qpAccessFlags = IBV_ACCESS_LOCAL_WRITE;
-    NCCLCHECK(ncclIbQpInit(localQp));
+    NCCLCHECK(IbCastQpInit(localQp));
 
-    ncclIbQpInfo* remQpInfo = &remInfo->resiliencyInfo.portRecoveryQpsInfo[localQpIndex];
-    ncclIbDevInfo* remDevInfo = &remInfo->devs[remQpInfo->devIndex];
+    IbCastQpInfo* remQpInfo = &remInfo->resiliencyInfo.portRecoveryQpsInfo[localQpIndex];
+    IbCastDevInfo* remDevInfo = &remInfo->devs[remQpInfo->devIndex];
 
-    struct ncclIbQpRtrAttr* rtrAttr = &localQp->rtrAttr;
+    struct IbCastQpRtrAttr* rtrAttr = &localQp->rtrAttr;
     rtrAttr->mtu = std::min(remDevInfo->mtu, ibDev->portAttr.active_mtu);
     rtrAttr->linkLayer = remDevInfo->link_layer;
     rtrAttr->tc = (remDevInfo->link_layer == IBV_LINK_LAYER_ETHERNET) ? remInfo->tc : -1;
@@ -422,17 +422,17 @@ ncclResult_t ncclIbPortRecoveryReceiverQpsCreateToRts(struct ncclIbResiliency* r
     rtrAttr->localIbPort = remDevInfo->ib_port;
     rtrAttr->localGid = recvCommDev->base.gidInfo.localGid;
     rtrAttr->localGidIndex = recvCommDev->base.gidInfo.localGidIndex;
-    NCCLCHECK(ncclIbQpRtr(localQp));
+    NCCLCHECK(IbCastQpRtr(localQp));
 
-    NCCLCHECK(ncclIbQpRts(localQp));
+    NCCLCHECK(IbCastQpRts(localQp));
     INFO(NCCL_NET, "NET/IB: %s: To RTS done on recovery QP (index=%d, qp_num=%u, dest_qp_num=%u, deviceIndex=%d, comm=%p)", __func__, localQpIndex, localQp->qp->qp_num, rtrAttr->remoteQpNum, localDevIndex, resCtx->baseComm);
   }
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryQpsDestroy(struct ncclIbResiliency* resCtx, int nQps) {
+ncclResult_t IbCastPortRecoveryQpsDestroy(struct IbCastResiliency* resCtx, int nQps) {
   for (int qpIndex = 0; qpIndex < nQps; qpIndex++) {
-    struct ncclIbQp* recoveryQp = &resCtx->portRecoveryQps[qpIndex];
+    struct IbCastQp* recoveryQp = &resCtx->portRecoveryQps[qpIndex];
     if (!recoveryQp->qp) {
       continue;
     }
@@ -442,24 +442,24 @@ ncclResult_t ncclIbPortRecoveryQpsDestroy(struct ncclIbResiliency* resCtx, int n
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryQpsRestore(ncclIbPortRecoveryContext* recoveryContext, bool* success) {
+static inline ncclResult_t IbCastPortRecoveryQpsRestore(IbCastPortRecoveryContext* recoveryContext, bool* success) {
   ncclResult_t res = ncclSuccess;
   uint nqps = recoveryContext->resCtx->baseComm->nqps;
   for (int qpIndex = 0; qpIndex < nqps; qpIndex++) {
-    ncclIbQp* localQp = &recoveryContext->resCtx->baseComm->qps[qpIndex];
+    IbCastQp* localQp = &recoveryContext->resCtx->baseComm->qps[qpIndex];
     if (localQp->devIndex != recoveryContext->devIndex) {
       // The QP is not on the recovered device; skip
       continue;
     }
 
     INFO(NCCL_NET, "NET/IB: %s: Restoring QP %d on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
-    res = ncclIbQpReset(localQp);
+    res = IbCastQpReset(localQp);
     if (res != ncclSuccess) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to reset QP index %d on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
       *success = false;
       return ncclSuccess;
     }
-    res = ncclIbQpInit(localQp);
+    res = IbCastQpInit(localQp);
     if (res != ncclSuccess) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to init QP index %d on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
       *success = false;
@@ -473,13 +473,13 @@ static inline ncclResult_t ncclIbPortRecoveryQpsRestore(ncclIbPortRecoveryContex
         return ncclSuccess;
       }
     }
-    res = ncclIbQpRtr(localQp);
+    res = IbCastQpRtr(localQp);
     if (res != ncclSuccess) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to modify to RTR QP index %d on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
       *success = false;
       return ncclSuccess;
     }
-    res = ncclIbQpRts(localQp);
+    res = IbCastQpRts(localQp);
     if (res != ncclSuccess) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to modify to RTS QP index %d on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
       *success = false;
@@ -490,8 +490,8 @@ static inline ncclResult_t ncclIbPortRecoveryQpsRestore(ncclIbPortRecoveryContex
     if (!recoveryContext->resCtx->baseComm->isSend) {
       // Pre-post receive work requests on the restored QP if this is a receiver.
       INFO(NCCL_NET, "NET/IB: %s: Posting receive work requests on the restored QP (comm=%p, qp_num=%u)", __func__, recoveryContext->resCtx->baseComm, localQp->qp->qp_num);
-      struct ncclIbRecvComm* recvComm = (struct ncclIbRecvComm*)recoveryContext->resCtx->baseComm;
-      res = ncclIbPostReceiveWorkRequestsOnQp(recvComm, localQp);
+      struct IbCastRecvComm* recvComm = (struct IbCastRecvComm*)recoveryContext->resCtx->baseComm;
+      res = IbCastPostReceiveWorkRequestsOnQp(recvComm, localQp);
       if (res != ncclSuccess) {
         INFO(NCCL_NET, "NET/IB: %s: Failed to post recv WQEs on QP index %d on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, localQp->qp->qp_num);
         *success = false;
@@ -502,32 +502,32 @@ static inline ncclResult_t ncclIbPortRecoveryQpsRestore(ncclIbPortRecoveryContex
 
   if (recoveryContext->resCtx->baseComm->isSend == false) {
     // Restore "Flush QP"
-    ncclIbRecvComm* recvComm = (ncclIbRecvComm*)recoveryContext->resCtx->baseComm;
+    IbCastRecvComm* recvComm = (IbCastRecvComm*)recoveryContext->resCtx->baseComm;
     if (recvComm->flushEnabled) {
       for (int i = 0; i < recvComm->base.vProps.ndevs; i++) {
         if (i != recoveryContext->devIndex) continue;
-        struct ncclIbRecvCommDev* rCommDev = &recvComm->devs[i];
-        ncclIbQp* flushQp = &rCommDev->gpuFlush.qp;
+        struct IbCastRecvCommDev* rCommDev = &recvComm->devs[i];
+        IbCastQp* flushQp = &rCommDev->gpuFlush.qp;
         TRACE(NCCL_NET, "NET/IB: %s: Restoring Flush QP on device %d (comm=%p)", __func__, i, recoveryContext->resCtx->baseComm);
-        res = ncclIbQpReset(flushQp);
+        res = IbCastQpReset(flushQp);
         if (res != ncclSuccess) {
           INFO(NCCL_NET, "NET/IB: %s: Failed to reset Flush QP on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, flushQp->qp->qp_num);
           *success = false;
           return ncclSuccess;
         }
-        res = ncclIbQpInit(flushQp);
+        res = IbCastQpInit(flushQp);
         if (res != ncclSuccess) {
           INFO(NCCL_NET, "NET/IB: %s: Failed to init Flush QP on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, flushQp->qp->qp_num);
           *success = false;
           return ncclSuccess;
         }
-        res = ncclIbQpRtr(flushQp);
+        res = IbCastQpRtr(flushQp);
         if (res != ncclSuccess) {
           INFO(NCCL_NET, "NET/IB: %s: Failed to modify to RTR Flush QP on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, flushQp->qp->qp_num);
           *success = false;
           return ncclSuccess;
         }
-        res = ncclIbQpRts(flushQp);
+        res = IbCastQpRts(flushQp);
         if (res != ncclSuccess) {
           INFO(NCCL_NET, "NET/IB: %s: Failed to modify to RTS Flush QP on device %d (comm=%p, devIndex=%d, qp_num=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex, flushQp->qp->qp_num);
           *success = false;
@@ -543,15 +543,15 @@ static inline ncclResult_t ncclIbPortRecoveryQpsRestore(ncclIbPortRecoveryContex
 
 #define NCCL_IB_RESILIENCY_PORT_RECOVERY_ACK_MSG_ID (0x1234)
 
-static inline ncclResult_t ncclIbPortRecoveryHandleCompletionReceiver(struct ncclIbPortRecoveryContext* recoveryContext, struct ibv_wc completion, bool* success) {
+static inline ncclResult_t IbCastPortRecoveryHandleCompletionReceiver(struct IbCastPortRecoveryContext* recoveryContext, struct ibv_wc completion, bool* success) {
   ncclResult_t res = ncclSuccess;
   INFO(NCCL_NET, "NET/IB: %s: Receiver received completion for device %d (comm=%p, wr_id=%lu, opcode=%s, imm_data=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, completion.wr_id, ibvWcOpcodeStr(completion.opcode), completion.imm_data);
-  if (recoveryContext->state == ncclIbPortRecoveryStateAliveMessages) {
+  if (recoveryContext->state == IbCastPortRecoveryStateAliveMessages) {
     if (recoveryContext->ackPosted) {
       // Receiver waits for it's own local ACK completion
       if (completion.opcode == IBV_WC_RECV) {
         INFO(NCCL_NET, "NET/IB: %s: Receiver expected local completion of ACK message for device %d (comm=%p) but got completion with opcode: %s", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, ibvWcOpcodeStr(completion.opcode));
-        res = ncclIbPortRecoveryPostRecvWorkRequest(recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp);
+        res = IbCastPortRecoveryPostRecvWorkRequest(recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp);
         if (res != ncclSuccess) {
           INFO(NCCL_NET, "NET/IB: %s: Receiver failed to post recv WR on data QP for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
           *success = false;
@@ -580,7 +580,7 @@ static inline ncclResult_t ncclIbPortRecoveryHandleCompletionReceiver(struct ncc
         recoveryContext->recv.nInOrderMsgsReceived = 0;
       }
       recoveryContext->timeLastMsg = clockNano();
-      res = ncclIbPortRecoveryPostRecvWorkRequest(recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp);
+      res = IbCastPortRecoveryPostRecvWorkRequest(recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp);
       if (res != ncclSuccess) {
           INFO(NCCL_NET, "NET/IB: %s: Receiver failed to post recv WR on recovery QP for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
         *success = false;
@@ -588,7 +588,7 @@ static inline ncclResult_t ncclIbPortRecoveryHandleCompletionReceiver(struct ncc
       }
     }
   }
-  if (recoveryContext->state == ncclIbPortRecoveryStateAck) {
+  if (recoveryContext->state == IbCastPortRecoveryStateAck) {
     assert(completion.opcode == IBV_WC_RECV);
     assert(completion.imm_data == NCCL_IB_RESILIENCY_PORT_RECOVERY_ACK_MSG_ID);
     INFO(NCCL_NET, "NET/IB: %s: Receiver received final ACK message for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
@@ -598,9 +598,9 @@ static inline ncclResult_t ncclIbPortRecoveryHandleCompletionReceiver(struct ncc
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryHandleCompletionSender(struct ncclIbPortRecoveryContext* recoveryContext, struct ibv_wc completion, bool* success) {
+static inline ncclResult_t IbCastPortRecoveryHandleCompletionSender(struct IbCastPortRecoveryContext* recoveryContext, struct ibv_wc completion, bool* success) {
   INFO(NCCL_NET, "NET/IB: %s: Sender received completion for device %d (comm=%p, wr_id=%lu, opcode=%s, imm_data=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, completion.wr_id, ibvWcOpcodeStr(completion.opcode), completion.imm_data);
-  if (recoveryContext->state == ncclIbPortRecoveryStateAliveMessages) {
+  if (recoveryContext->state == IbCastPortRecoveryStateAliveMessages) {
     if (completion.opcode == IBV_WC_SEND) {
       assert(!recoveryContext->send.aliveMsgCompleted);
       INFO(NCCL_NET, "NET/IB: %s: Sender's alive messages batch completed locally for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
@@ -611,7 +611,7 @@ static inline ncclResult_t ncclIbPortRecoveryHandleCompletionSender(struct ncclI
       return ncclSuccess;
     }
   }
-  if (recoveryContext->state == ncclIbPortRecoveryStateAck) {
+  if (recoveryContext->state == IbCastPortRecoveryStateAck) {
     if (!recoveryContext->ackReceived) {
       // Sender waits for ACK from receiver
       assert(completion.opcode == IBV_WC_RECV);
@@ -633,7 +633,7 @@ static inline ncclResult_t ncclIbPortRecoveryHandleCompletionSender(struct ncclI
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryPollCq(struct ncclIbPortRecoveryContext* recoveryContext, bool* success) {
+static inline ncclResult_t IbCastPortRecoveryPollCq(struct IbCastPortRecoveryContext* recoveryContext, bool* success) {
   int completions = 0;
   struct ibv_wc completion;
 
@@ -656,9 +656,9 @@ static inline ncclResult_t ncclIbPortRecoveryPollCq(struct ncclIbPortRecoveryCon
   }
 
   if (recoveryContext->resCtx->baseComm->isSend) {
-    NCCLCHECK(ncclIbPortRecoveryHandleCompletionSender(recoveryContext, completion, success));
+    NCCLCHECK(IbCastPortRecoveryHandleCompletionSender(recoveryContext, completion, success));
   } else {
-    NCCLCHECK(ncclIbPortRecoveryHandleCompletionReceiver(recoveryContext, completion, success));
+    NCCLCHECK(IbCastPortRecoveryHandleCompletionReceiver(recoveryContext, completion, success));
   }
   if (!*success) {
     INFO(NCCL_NET, "NET/IB: %s: Failed to handle %s completion for device %d (comm=%p, wc.opcode=%s(%d), wc.wr_id=%ld)", __func__, recoveryContext->resCtx->baseComm->isSend ? "sender" : "receiver", recoveryContext->devIndex, recoveryContext->resCtx->baseComm, ibvWcOpcodeStr(completion.opcode), completion.opcode, completion.wr_id);
@@ -666,14 +666,14 @@ static inline ncclResult_t ncclIbPortRecoveryPollCq(struct ncclIbPortRecoveryCon
   return ncclSuccess;
 }
 
-enum ncclIbPortRecoveryStateProgressResult {
-  ncclIbPortRecoveryStateProgressResultInProgress,
-  ncclIbPortRecoveryStateProgressResultGoToNextState,
-  ncclIbPortRecoveryStateProgressResultGoToPrevState,
-  ncclIbPortRecoveryStateProgressResultFailed
+enum IbCastPortRecoveryStateProgressResult {
+  IbCastPortRecoveryStateProgressResultInProgress,
+  IbCastPortRecoveryStateProgressResultGoToNextState,
+  IbCastPortRecoveryStateProgressResultGoToPrevState,
+  IbCastPortRecoveryStateProgressResultFailed
 };
 
-static inline ncclResult_t ncclIbPortRecoveryPostAliveMessages(struct ncclIbPortRecoveryContext* recoveryContext, bool* success) {
+static inline ncclResult_t IbCastPortRecoveryPostAliveMessages(struct IbCastPortRecoveryContext* recoveryContext, bool* success) {
   struct ibv_send_wr *bad_wr = NULL;
   struct ibv_send_wr wr[NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX];
   int nMsgsToPost = ncclParamIbResiliencyPortRecoveryAliveMsgSequenceSize();
@@ -699,7 +699,7 @@ static inline ncclResult_t ncclIbPortRecoveryPostAliveMessages(struct ncclIbPort
   }
 
   // Post the send operation on the recovery QP.
-  struct ncclIbQp* recoveryQp = &recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex];
+  struct IbCastQp* recoveryQp = &recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex];
   if (ibv_post_send(recoveryQp->qp, &wr[0], &bad_wr)) {
     INFO(NCCL_NET, "NET/IB: %s: Sender failed to post alive messages batch on device %d (comm=%p, qp_num=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryQp->qp->qp_num);
     *success = false;
@@ -712,7 +712,7 @@ static inline ncclResult_t ncclIbPortRecoveryPostAliveMessages(struct ncclIbPort
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryPostAck(ncclIbPortRecoveryContext* recoveryContext, bool* success) {
+static inline ncclResult_t IbCastPortRecoveryPostAck(IbCastPortRecoveryContext* recoveryContext, bool* success) {
   struct ibv_send_wr *bad_wr = NULL;
   struct ibv_send_wr wr;
   memset(&wr, 0, sizeof(wr));
@@ -726,7 +726,7 @@ static inline ncclResult_t ncclIbPortRecoveryPostAck(ncclIbPortRecoveryContext* 
   INFO(NCCL_NET, "NET/IB: %s: %s posting ACK message for device %d (comm=%p)", __func__, recoveryContext->resCtx->baseComm->isSend ? "Sender" : "Receiver", recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
 
   // Post the send operation on the recovery QP.
-  struct ncclIbQp* recoveryQp = &recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex];
+  struct IbCastQp* recoveryQp = &recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex];
   if (ibv_post_send(recoveryQp->qp, &wr, &bad_wr)) {
     INFO(NCCL_NET, "NET/IB: %s: Failed to post ack message on device %d (comm=%p, qp_num=%u)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryQp->qp->qp_num);
     *success = false;
@@ -737,53 +737,53 @@ static inline ncclResult_t ncclIbPortRecoveryPostAck(ncclIbPortRecoveryContext* 
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryProgressAliveMessagesSender(ncclIbPortRecoveryContext* recoveryContext, enum ncclIbPortRecoveryStateProgressResult* outResult) {
+static inline ncclResult_t IbCastPortRecoveryProgressAliveMessagesSender(IbCastPortRecoveryContext* recoveryContext, enum IbCastPortRecoveryStateProgressResult* outResult) {
   // Sender can either post new alive messages or poll for completions of previously
   // posted alive messages.
   if (!recoveryContext->send.aliveMsgPosted) {
     // Check if sender should send a new batch of alive messages
     uint64_t now = clockNano();
     if (now - recoveryContext->timeLastMsg < ncclParamIbResiliencyPortRecoveryAliveMsgBatchInterval() * MSEC_TO_NSEC) {
-      *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+      *outResult = IbCastPortRecoveryStateProgressResultInProgress;
       return ncclSuccess;
     }
     // Post a new batch of alive messages
     INFO(NCCL_NET, "NET/IB: %s: Posting alive message batch for device %d (comm=%p, devIndex=%d)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, recoveryContext->devIndex);
     bool success = false;
-    NCCLCHECK(ncclIbPortRecoveryPostAliveMessages(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPostAliveMessages(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to post alive messages batch for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
-    *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+    *outResult = IbCastPortRecoveryStateProgressResultInProgress;
   } else {
     // Poll for completions of previously posted alive messages
     bool success = false;
-    NCCLCHECK(ncclIbPortRecoveryPollCq(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPollCq(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to poll CQ for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
     if (recoveryContext->send.aliveMsgCompleted) {
       INFO(NCCL_NET, "NET/IB: %s: Sender marked that alive messages batch completed for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultGoToNextState;
+      *outResult = IbCastPortRecoveryStateProgressResultGoToNextState;
     } else {
-      *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+      *outResult = IbCastPortRecoveryStateProgressResultInProgress;
     }
   }
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryProgressAliveMessagesReceiver(ncclIbPortRecoveryContext* recoveryContext, enum ncclIbPortRecoveryStateProgressResult* outResult) {
+static inline ncclResult_t IbCastPortRecoveryProgressAliveMessagesReceiver(IbCastPortRecoveryContext* recoveryContext, enum IbCastPortRecoveryStateProgressResult* outResult) {
   bool success = false;
   ncclResult_t res = ncclSuccess;
   if (recoveryContext->ackPosted == false) {
-    NCCLCHECK(ncclIbPortRecoveryPollCq(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPollCq(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to poll CQ for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
     if (recoveryContext->recv.nInOrderMsgsReceived > ncclParamIbResiliencyPortRecoveryAliveMsgSequenceSize()) {
@@ -791,26 +791,26 @@ static inline ncclResult_t ncclIbPortRecoveryProgressAliveMessagesReceiver(ncclI
       // remaining alive messages and proceeding to restore QPs and post ACK.
       // Draining is important to ensure that if the receiver goes back to the
       // previous state, it will not see stale alive messages.
-      NCCLCHECK(ncclIbPortRecoveryDrainCqAndPostReceiveWRs(recoveryContext, &success));
+      NCCLCHECK(IbCastPortRecoveryDrainCqAndPostReceiveWRs(recoveryContext, &success));
       if (!success) {
         INFO(NCCL_NET, "NET/IB: %s: Failed to drain CQ and post recv WRs for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-        *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+        *outResult = IbCastPortRecoveryStateProgressResultFailed;
         return ncclSuccess;
       }
       INFO(NCCL_NET, "NET/IB: %s: Receiver received enough in-order alive messages for device %d (comm=%p). Restoring QPs and posting ACK message.", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      NCCLCHECK(ncclIbPortRecoveryQpsRestore(recoveryContext, &success));
+      NCCLCHECK(IbCastPortRecoveryQpsRestore(recoveryContext, &success));
       if (!success) {
         INFO(NCCL_NET, "NET/IB: %s: Receiver failed to restore QPs on device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-        *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+        *outResult = IbCastPortRecoveryStateProgressResultFailed;
         return ncclSuccess;
       }
-      NCCLCHECK(ncclIbPortRecoveryPostAck(recoveryContext, &success));
+      NCCLCHECK(IbCastPortRecoveryPostAck(recoveryContext, &success));
       if (!success) {
         INFO(NCCL_NET, "NET/IB: %s: Failed to post ACK message for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-        *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+        *outResult = IbCastPortRecoveryStateProgressResultFailed;
         return ncclSuccess;
       }
-      *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+      *outResult = IbCastPortRecoveryStateProgressResultInProgress;
     } else {
       uint64_t now = clockNano();
       if (now - recoveryContext->timeLastMsg > ncclParamIbResiliencyPortRecoveryAliveMsgTimeout() * MSEC_TO_NSEC) {
@@ -818,24 +818,24 @@ static inline ncclResult_t ncclIbPortRecoveryProgressAliveMessagesReceiver(ncclI
         INFO(NCCL_NET, "NET/IB: %s: Alive message sequence timeout for device %d (%s comm=%p, failedAttempts=%d)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm, recoveryContext->nFailedAttempts);
         if (recoveryContext->nFailedAttempts >= ncclParamIbResiliencyPortRecoveryAttemptsMax()) {
           INFO(NCCL_NET, "NET/IB: %s: Recovery for device %d failed due to max attempts reached (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-          *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+          *outResult = IbCastPortRecoveryStateProgressResultFailed;
           return ncclSuccess;
         }
         // "Reset" the timer till timeout
         recoveryContext->timeLastMsg = now;
       }
-      *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+      *outResult = IbCastPortRecoveryStateProgressResultInProgress;
     }
   } else {
     bool success = false;
-    NCCLCHECK(ncclIbPortRecoveryPollCq(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPollCq(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to poll CQ for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
     if (recoveryContext->ackCompleted) {
-      *outResult = ncclIbPortRecoveryStateProgressResultGoToNextState;
+      *outResult = IbCastPortRecoveryStateProgressResultGoToNextState;
     } else {
       uint64_t now = clockNano();
       if (now - recoveryContext->timeLastMsg > ncclParamIbResiliencyPortRecoveryAckTimeout() * MSEC_TO_NSEC) {
@@ -843,64 +843,64 @@ static inline ncclResult_t ncclIbPortRecoveryProgressAliveMessagesReceiver(ncclI
         INFO(NCCL_NET, "NET/IB: %s: ACK message timeout for device %d (%s comm=%p, failedAttempts=%d)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm, recoveryContext->nFailedAttempts);
         if (recoveryContext->nFailedAttempts >= ncclParamIbResiliencyPortRecoveryAttemptsMax()) {
           INFO(NCCL_NET, "NET/IB: %s: Recovery for device %d failed due to max attempts reached (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-          *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+          *outResult = IbCastPortRecoveryStateProgressResultFailed;
           return ncclSuccess;
         }
         // Go back to alive messages state
         recoveryContext->ackPosted = false;
         recoveryContext->ackCompleted = false;
         recoveryContext->timeLastMsg = now;
-        *outResult = ncclIbPortRecoveryStateProgressResultGoToPrevState;
+        *outResult = IbCastPortRecoveryStateProgressResultGoToPrevState;
         INFO(NCCL_NET, "NET/IB: %s: Receiver posting (%d) recv WRs on device %d (comm=%p)", __func__, NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
         for (int i = 0; i < NCCL_IB_RESILIENCY_PORT_RECOVERY_ALIVE_MSG_BATCH_SIZE_MAX; i++) {
-          res = ncclIbPortRecoveryPostRecvWorkRequest(recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp);
+          res = IbCastPortRecoveryPostRecvWorkRequest(recoveryContext->resCtx->portRecoveryQps[recoveryContext->devIndex].qp);
           if (res != ncclSuccess) {
             INFO(NCCL_NET, "NET/IB: %s: Receiver failed to post recv WR on recovery QP for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-            *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+            *outResult = IbCastPortRecoveryStateProgressResultFailed;
             return ncclSuccess;
           }
         }
       } else {
-        *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+        *outResult = IbCastPortRecoveryStateProgressResultInProgress;
       }
     }
   }
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryProgressAliveMessages(ncclIbPortRecoveryContext* recoveryContext) {
-  enum ncclIbPortRecoveryStateProgressResult progressResult = ncclIbPortRecoveryStateProgressResultGoToNextState;
+static inline ncclResult_t IbCastPortRecoveryProgressAliveMessages(IbCastPortRecoveryContext* recoveryContext) {
+  enum IbCastPortRecoveryStateProgressResult progressResult = IbCastPortRecoveryStateProgressResultGoToNextState;
   if (recoveryContext->resCtx->baseComm->isSend) {
-    NCCLCHECK(ncclIbPortRecoveryProgressAliveMessagesSender(recoveryContext, &progressResult));
+    NCCLCHECK(IbCastPortRecoveryProgressAliveMessagesSender(recoveryContext, &progressResult));
   } else {
-    NCCLCHECK(ncclIbPortRecoveryProgressAliveMessagesReceiver(recoveryContext, &progressResult));
+    NCCLCHECK(IbCastPortRecoveryProgressAliveMessagesReceiver(recoveryContext, &progressResult));
   }
   switch (progressResult) {
-    case ncclIbPortRecoveryStateProgressResultGoToPrevState:
+    case IbCastPortRecoveryStateProgressResultGoToPrevState:
       WARN("NET/IB: %s: Unexpected GoToPrevState result in AliveMessages state for device %d (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
       return ncclInternalError;
-    case ncclIbPortRecoveryStateProgressResultGoToNextState:
+    case IbCastPortRecoveryStateProgressResultGoToNextState:
       INFO(NCCL_NET, "NET/IB: %s: Alive messages phase completed for device %d. Moving to next phase (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-      recoveryContext->state = ncclIbPortRecoveryStateAck;
+      recoveryContext->state = IbCastPortRecoveryStateAck;
       break;
-    case ncclIbPortRecoveryStateProgressResultFailed:
+    case IbCastPortRecoveryStateProgressResultFailed:
       INFO(NCCL_NET, "NET/IB: %s: Recovery for device %d failed (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-      recoveryContext->state = ncclIbPortRecoveryStateFailed;
+      recoveryContext->state = IbCastPortRecoveryStateFailed;
       break;
-    case ncclIbPortRecoveryStateProgressResultInProgress:
+    case IbCastPortRecoveryStateProgressResultInProgress:
       // Do nothing
       break;
   }
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryProgressAckSender(ncclIbPortRecoveryContext* recoveryContext, enum ncclIbPortRecoveryStateProgressResult* outResult) {
+static inline ncclResult_t IbCastPortRecoveryProgressAckSender(IbCastPortRecoveryContext* recoveryContext, enum IbCastPortRecoveryStateProgressResult* outResult) {
   bool success = false;
   if (!recoveryContext->ackReceived) {
-    NCCLCHECK(ncclIbPortRecoveryPollCq(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPollCq(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to poll CQ for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
     if (!recoveryContext->ackReceived) {
@@ -911,58 +911,58 @@ static inline ncclResult_t ncclIbPortRecoveryProgressAckSender(ncclIbPortRecover
         INFO(NCCL_NET, "NET/IB: %s: Port recovery attempt #%d failed for devIndex=%d (comm=%p)", __func__, recoveryContext->nFailedAttempts, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
         if (recoveryContext->nFailedAttempts >= ncclParamIbResiliencyPortRecoveryAttemptsMax()) {
           INFO(NCCL_NET, "NET/IB: %s: Recovery for device %d failed due to max attempts reached (send comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-          *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+          *outResult = IbCastPortRecoveryStateProgressResultFailed;
           return ncclSuccess;
         }
-        *outResult = ncclIbPortRecoveryStateProgressResultGoToPrevState;
+        *outResult = IbCastPortRecoveryStateProgressResultGoToPrevState;
         // Reset internal state
         recoveryContext->send.aliveMsgPosted = false;
         recoveryContext->send.aliveMsgCompleted = false;
       } else {
-        *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+        *outResult = IbCastPortRecoveryStateProgressResultInProgress;
       }
       return ncclSuccess;
     }
   }
 
   if (recoveryContext->ackPosted == false) {
-    NCCLCHECK(ncclIbPortRecoveryQpsRestore(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryQpsRestore(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Sender failed to restore QPs on device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
-    NCCLCHECK(ncclIbPortRecoveryPostAck(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPostAck(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to post ack for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
-    *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+    *outResult = IbCastPortRecoveryStateProgressResultInProgress;
   }
 
   if (!recoveryContext->ackCompleted) {
-    NCCLCHECK(ncclIbPortRecoveryPollCq(recoveryContext, &success));
+    NCCLCHECK(IbCastPortRecoveryPollCq(recoveryContext, &success));
     if (!success) {
       INFO(NCCL_NET, "NET/IB: %s: Failed to poll CQ for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-      *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+      *outResult = IbCastPortRecoveryStateProgressResultFailed;
       return ncclSuccess;
     }
     if (recoveryContext->ackCompleted) {
-      *outResult = ncclIbPortRecoveryStateProgressResultGoToNextState;
+      *outResult = IbCastPortRecoveryStateProgressResultGoToNextState;
     } else {
-      *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+      *outResult = IbCastPortRecoveryStateProgressResultInProgress;
     }
   }
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryProgressAckReceiver(ncclIbPortRecoveryContext* recoveryContext, enum ncclIbPortRecoveryStateProgressResult* outResult) {
+static inline ncclResult_t IbCastPortRecoveryProgressAckReceiver(IbCastPortRecoveryContext* recoveryContext, enum IbCastPortRecoveryStateProgressResult* outResult) {
   bool success = false;
-  NCCLCHECK(ncclIbPortRecoveryPollCq(recoveryContext, &success));
+  NCCLCHECK(IbCastPortRecoveryPollCq(recoveryContext, &success));
   if (!success) {
     INFO(NCCL_NET, "NET/IB: %s: Failed to poll CQ for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-    *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+    *outResult = IbCastPortRecoveryStateProgressResultFailed;
     return ncclSuccess;
   }
   if (!recoveryContext->ackReceived) {
@@ -972,61 +972,61 @@ static inline ncclResult_t ncclIbPortRecoveryProgressAckReceiver(ncclIbPortRecov
       recoveryContext->nFailedAttempts++;
       INFO(NCCL_NET, "NET/IB: %s: Port recovery attempt #%d failed for devIndex=%d (comm=%p)", __func__, recoveryContext->nFailedAttempts, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
       if (recoveryContext->nFailedAttempts >= ncclParamIbResiliencyPortRecoveryAttemptsMax()) {
-        *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+        *outResult = IbCastPortRecoveryStateProgressResultFailed;
         return ncclSuccess;
       }
-      *outResult = ncclIbPortRecoveryStateProgressResultGoToPrevState;
+      *outResult = IbCastPortRecoveryStateProgressResultGoToPrevState;
       // Reset internal state
       recoveryContext->ackPosted = false;
       recoveryContext->ackCompleted = false;
       recoveryContext->recv.nInOrderMsgsReceived = 0;
-      NCCLCHECK(ncclIbPortRecoveryDrainCqAndPostReceiveWRs(recoveryContext, &success));
+      NCCLCHECK(IbCastPortRecoveryDrainCqAndPostReceiveWRs(recoveryContext, &success));
       if (!success) {
         INFO(NCCL_NET, "NET/IB: %s: Failed to drain CQ and post recv WRs for device %d (comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm);
-        *outResult = ncclIbPortRecoveryStateProgressResultFailed;
+        *outResult = IbCastPortRecoveryStateProgressResultFailed;
         return ncclSuccess;
       }
     } else {
-      *outResult = ncclIbPortRecoveryStateProgressResultInProgress;
+      *outResult = IbCastPortRecoveryStateProgressResultInProgress;
     }
   } else {
-    *outResult = ncclIbPortRecoveryStateProgressResultGoToNextState;
+    *outResult = IbCastPortRecoveryStateProgressResultGoToNextState;
   }
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryProgressAck(ncclIbPortRecoveryContext* recoveryContext) {
-  enum ncclIbPortRecoveryStateProgressResult progressResult = ncclIbPortRecoveryStateProgressResultFailed;
+static inline ncclResult_t IbCastPortRecoveryProgressAck(IbCastPortRecoveryContext* recoveryContext) {
+  enum IbCastPortRecoveryStateProgressResult progressResult = IbCastPortRecoveryStateProgressResultFailed;
   if (recoveryContext->resCtx->baseComm->isSend) {
-    NCCLCHECK(ncclIbPortRecoveryProgressAckSender(recoveryContext, &progressResult));
+    NCCLCHECK(IbCastPortRecoveryProgressAckSender(recoveryContext, &progressResult));
   } else {
-    NCCLCHECK(ncclIbPortRecoveryProgressAckReceiver(recoveryContext, &progressResult));
+    NCCLCHECK(IbCastPortRecoveryProgressAckReceiver(recoveryContext, &progressResult));
   }
   switch (progressResult) {
-    case ncclIbPortRecoveryStateProgressResultGoToPrevState:
+    case IbCastPortRecoveryStateProgressResultGoToPrevState:
       INFO(NCCL_NET, "NET/IB: %s: Restarting alive messages phase for device %d (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-      recoveryContext->state = ncclIbPortRecoveryStateAliveMessages;
+      recoveryContext->state = IbCastPortRecoveryStateAliveMessages;
       break;
-    case ncclIbPortRecoveryStateProgressResultGoToNextState:
+    case IbCastPortRecoveryStateProgressResultGoToNextState:
       INFO(NCCL_NET, "NET/IB: %s: ACK phase completed for device %d (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-      recoveryContext->state = ncclIbPortRecoveryStateSuccess;
+      recoveryContext->state = IbCastPortRecoveryStateSuccess;
       break;
-    case ncclIbPortRecoveryStateProgressResultFailed:
+    case IbCastPortRecoveryStateProgressResultFailed:
       INFO(NCCL_NET, "NET/IB: %s: Recovery for device %d failed (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-      recoveryContext->state = ncclIbPortRecoveryStateFailed;
+      recoveryContext->state = IbCastPortRecoveryStateFailed;
       break;
-    case ncclIbPortRecoveryStateProgressResultInProgress:
+    case IbCastPortRecoveryStateProgressResultInProgress:
       // Do nothing
       break;
   }
   return ncclSuccess;
 }
 
-static inline ncclResult_t ncclIbPortRecoveryContextProgress(ncclIbPortRecoveryContext* recoveryContext, bool* outDone) {
+static inline ncclResult_t IbCastPortRecoveryContextProgress(IbCastPortRecoveryContext* recoveryContext, bool* outDone) {
   assert(recoveryContext);
   assert(outDone);
 
-  if (recoveryContext->state == ncclIbPortRecoveryStateInit) {
+  if (recoveryContext->state == IbCastPortRecoveryStateInit) {
     uint64_t now = clockNano();
     if (now - recoveryContext->timeInit < ncclParamIbResiliencyPortRecoveryStartDelay() * MSEC_TO_NSEC) {
       *outDone = false;
@@ -1036,34 +1036,34 @@ static inline ncclResult_t ncclIbPortRecoveryContextProgress(ncclIbPortRecoveryC
     if (recoveryContext->resCtx->baseComm->isSend) {
       recoveryContext-> timeLastMsg = 0;
     }
-    recoveryContext->state = ncclIbPortRecoveryStateAliveMessages;
+    recoveryContext->state = IbCastPortRecoveryStateAliveMessages;
   }
 
-  if (recoveryContext->state == ncclIbPortRecoveryStateAliveMessages) {
-    NCCLCHECK(ncclIbPortRecoveryProgressAliveMessages(recoveryContext));
+  if (recoveryContext->state == IbCastPortRecoveryStateAliveMessages) {
+    NCCLCHECK(IbCastPortRecoveryProgressAliveMessages(recoveryContext));
   }
 
-  if (recoveryContext->state == ncclIbPortRecoveryStateAck) {
-    NCCLCHECK(ncclIbPortRecoveryProgressAck(recoveryContext));
+  if (recoveryContext->state == IbCastPortRecoveryStateAck) {
+    NCCLCHECK(IbCastPortRecoveryProgressAck(recoveryContext));
   }
 
-  if (recoveryContext->state == ncclIbPortRecoveryStateSuccess) {
+  if (recoveryContext->state == IbCastPortRecoveryStateSuccess) {
     INFO(NCCL_NET, "NET/IB: %s: Port recovery succeeded for devIndex=%d (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
     for (int i = 0; i < recoveryContext->resCtx->ndevs; i++) {
         if (i != recoveryContext->devIndex) continue;
         INFO(NCCL_NET, "NET/IB: %s: Marking device %d as recovered (%s comm=%p)", __func__, i, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-        recoveryContext->resCtx->devs[i].state.store(ncclIbResiliencyDevStateRecovered, std::memory_order_release);
+        recoveryContext->resCtx->devs[i].state.store(IbCastResiliencyDevStateRecovered, std::memory_order_release);
         break;
       }
     *outDone = true;
   }
 
-  if (recoveryContext->state == ncclIbPortRecoveryStateFailed) {
+  if (recoveryContext->state == IbCastPortRecoveryStateFailed) {
     INFO(NCCL_NET, "NET/IB: %s: Port recovery failed for %s comm=%p devIndex=%d", __func__, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm, recoveryContext->devIndex);
     for (int i = 0; i < recoveryContext->resCtx->ndevs; i++) {
       if (i != recoveryContext->devIndex) continue;
       INFO(NCCL_NET, "NET/IB: %s: Marking device %d as permanently failed (%s comm=%p)", __func__, i, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-      recoveryContext->resCtx->devs[i].state.store(ncclIbResiliencyDevStateRecoveryFailed, std::memory_order_release);
+      recoveryContext->resCtx->devs[i].state.store(IbCastResiliencyDevStateRecoveryFailed, std::memory_order_release);
     }
     *outDone = true;
   }
@@ -1073,21 +1073,21 @@ static inline ncclResult_t ncclIbPortRecoveryContextProgress(ncclIbPortRecoveryC
 
 // Scan recoveryQueue and remove (destroy) any contexts belonging to the
 // resiliency contexts referenced by the close requests.
-static void ncclIbPortRecoveryHandleCloseRequests(std::vector<ncclIbPortRecoveryCloseRequest*>& closeRequests,
-                                                 std::list<ncclIbPortRecoveryContext*>& recoveryQueue) {
+static void IbCastPortRecoveryHandleCloseRequests(std::vector<IbCastPortRecoveryCloseRequest*>& closeRequests,
+                                                 std::list<IbCastPortRecoveryContext*>& recoveryQueue) {
   for (auto it = closeRequests.begin(); it != closeRequests.end(); ++it) {
-    ncclIbPortRecoveryCloseRequest* closeReq = *it;
+    IbCastPortRecoveryCloseRequest* closeReq = *it;
     int removedForThisReq = 0;
 
     // Iterate through the recovery queue and remove items belonging to this resCtx
     for (auto qIt = recoveryQueue.begin(); qIt != recoveryQueue.end(); ) {
-      ncclIbPortRecoveryContext* recoveryContext = *qIt;
+      IbCastPortRecoveryContext* recoveryContext = *qIt;
       if (recoveryContext->resCtx == closeReq->resCtx) {
         INFO(NCCL_NET, "NET/IB: %s: Removing recovery context for device %d belonging to closing resCtx (%s comm=%p)",
              __func__, recoveryContext->devIndex,
              recoveryContext->resCtx->baseComm->isSend ? "send" : "recv",
              recoveryContext->resCtx->baseComm);
-        ncclIbPortRecoveryContextDestroy(recoveryContext);
+        IbCastPortRecoveryContextDestroy(recoveryContext);
         qIt = recoveryQueue.erase(qIt);
         removedForThisReq++;
       } else {
@@ -1104,19 +1104,19 @@ static void ncclIbPortRecoveryHandleCloseRequests(std::vector<ncclIbPortRecovery
 // The thread waits for nodes to be added to the recovery queue and
 // processes them to advance their recovery protocol state.
 // The thread runs until the shutdown flag is set.
-ncclResult_t ncclIbPortRecoveryAsyncThreadMain() {
+ncclResult_t IbCastPortRecoveryAsyncThreadMain() {
   // Thread-local recovery queue. Items are transferred from recoveryInbox
   // under the lock and then iterated here without holding the lock.
-  std::list<ncclIbPortRecoveryContext*> recoveryQueue;
+  std::list<IbCastPortRecoveryContext*> recoveryQueue;
 
   while (true) {
     // Wait until queue is not empty, there are pending close requests, or
     // shutdown is requested (ThreadActive == false)
-    std::vector<ncclIbPortRecoveryCloseRequest*> localCloseRequests;
+    std::vector<IbCastPortRecoveryCloseRequest*> localCloseRequests;
     {
-      std::unique_lock<std::mutex> lock(ncclIbPortRecoveryMutex);
-      ncclIbPortRecoveryCond.wait(lock, [&] {
-        return !ncclIbPortRecoveryThreadActive.load() ||
+      std::unique_lock<std::mutex> lock(IbCastPortRecoveryMutex);
+      IbCastPortRecoveryCond.wait(lock, [&] {
+        return !IbCastPortRecoveryThreadActive.load() ||
                !recoveryInbox.empty() ||
                !recoveryQueue.empty() ||
                !recoveryCloseRequests.empty();
@@ -1131,30 +1131,30 @@ ncclResult_t ncclIbPortRecoveryAsyncThreadMain() {
 
     // Process close requests outside the lock (recoveryQueue is thread-local)
     if (!localCloseRequests.empty()) {
-      ncclIbPortRecoveryHandleCloseRequests(localCloseRequests, recoveryQueue);
+      IbCastPortRecoveryHandleCloseRequests(localCloseRequests, recoveryQueue);
 
       // Mark requests completed under lock to prevent lost-wakeup
       // on the close condition variable
       {
-        std::lock_guard<std::mutex> lock(ncclIbPortRecoveryMutex);
+        std::lock_guard<std::mutex> lock(IbCastPortRecoveryMutex);
         for (auto* closeReq : localCloseRequests) {
           closeReq->completed = true;
         }
-        ncclIbPortRecoveryCloseCond.notify_all();
+        IbCastPortRecoveryCloseCond.notify_all();
       }
     }
 
     // Check if the thread has been signaled to stop
-    if (!ncclIbPortRecoveryThreadActive.load()) break;
+    if (!IbCastPortRecoveryThreadActive.load()) break;
 
     // Iterate and advance recovery protocol on all nodes
     for (auto it = recoveryQueue.begin(); it != recoveryQueue.end(); ) {
       bool isDone = false;
-      ncclIbPortRecoveryContext* recoveryContext = *it;
-      NCCLCHECK(ncclIbPortRecoveryContextProgress(recoveryContext, &isDone));
+      IbCastPortRecoveryContext* recoveryContext = *it;
+      NCCLCHECK(IbCastPortRecoveryContextProgress(recoveryContext, &isDone));
       if (isDone) {
         INFO(NCCL_NET, "NET/IB: %s: Port recovery context done for device %d (%s comm=%p)", __func__, recoveryContext->devIndex, recoveryContext->resCtx->baseComm->isSend ? "send" : "recv", recoveryContext->resCtx->baseComm);
-        NCCLCHECK(ncclIbPortRecoveryContextDestroy(recoveryContext));
+        NCCLCHECK(IbCastPortRecoveryContextDestroy(recoveryContext));
         it = recoveryQueue.erase(it);
       } else {
         ++it;
@@ -1178,19 +1178,19 @@ ncclResult_t ncclIbPortRecoveryAsyncThreadMain() {
 // Implementation of entry point functions
 // -----------------------------
 
-ncclResult_t ncclIbPortRecoveryInit(struct ncclIbResiliency* resCtx) {
-  resCtx->recoveryEnabled = ncclIbPortRecoveryThreadActive.load();
+ncclResult_t IbCastPortRecoveryInit(struct IbCastResiliency* resCtx) {
+  resCtx->recoveryEnabled = IbCastPortRecoveryThreadActive.load();
   INFO(NCCL_NET, "NET/IB: %s: Port recovery %s (%s comm=%p)", __func__,
        resCtx->recoveryEnabled ? "initialized" : "disabled",
        resCtx->baseComm->isSend ? "send" : "recv", resCtx->baseComm);
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryClose(struct ncclIbResiliency* resCtx) {
+ncclResult_t IbCastPortRecoveryClose(struct IbCastResiliency* resCtx) {
   if (resCtx->recoveryEnabled == false) {
     return ncclSuccess;
   }
-  if (!ncclIbPortRecoveryThreadActive.load()) {
+  if (!IbCastPortRecoveryThreadActive.load()) {
     INFO(NCCL_NET, "NET/IB: %s: Recovery thread already stopped, skipping close (%s comm=%p)", __func__, resCtx->baseComm->isSend ? "send" : "recv", resCtx->baseComm);
     return ncclSuccess;
   }
@@ -1198,22 +1198,22 @@ ncclResult_t ncclIbPortRecoveryClose(struct ncclIbResiliency* resCtx) {
 
   // Create a close request to remove any potential queue items belonging to
   // this resCtx
-  ncclIbPortRecoveryCloseRequest closeReq;
+  IbCastPortRecoveryCloseRequest closeReq;
   closeReq.resCtx = resCtx;
   closeReq.completed = false;
 
   {
-    std::lock_guard<std::mutex> lock(ncclIbPortRecoveryMutex);
+    std::lock_guard<std::mutex> lock(IbCastPortRecoveryMutex);
     recoveryCloseRequests.push_back(&closeReq);
   }
 
   // Wake up the async thread to process the close request
-  ncclIbPortRecoveryCond.notify_one();
+  IbCastPortRecoveryCond.notify_one();
 
   // Wait for the close request to be completed by the async thread
   {
-    std::unique_lock<std::mutex> lock(ncclIbPortRecoveryMutex);
-    ncclIbPortRecoveryCloseCond.wait(lock, [&] {
+    std::unique_lock<std::mutex> lock(IbCastPortRecoveryMutex);
+    IbCastPortRecoveryCloseCond.wait(lock, [&] {
       return closeReq.completed;
     });
   }
@@ -1222,57 +1222,57 @@ ncclResult_t ncclIbPortRecoveryClose(struct ncclIbResiliency* resCtx) {
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryThreadStart() {
+ncclResult_t IbCastPortRecoveryThreadStart() {
   if (ncclParamIbResiliencyPortRecovery() == 0) {
     return ncclSuccess;
   }
 
-  ncclIbPortRecoveryRefCount++;
+  IbCastPortRecoveryRefCount++;
 
   // Only start the thread once (first caller wins)
   bool expected = false;
-  if (!ncclIbPortRecoveryThreadActive.compare_exchange_strong(expected, true)) {
+  if (!IbCastPortRecoveryThreadActive.compare_exchange_strong(expected, true)) {
     return ncclSuccess;
   }
 
   INFO(NCCL_NET, "NET/IB: %s: Starting port recovery async thread", __func__);
-  ncclIbPortRecoveryAsyncThread = std::thread(ncclIbPortRecoveryAsyncThreadMain);
-  ncclSetThreadName(ncclIbPortRecoveryAsyncThread.native_handle(), "NCCL IbResiliencyPortRecoveryAsync");
+  IbCastPortRecoveryAsyncThread = std::thread(IbCastPortRecoveryAsyncThreadMain);
+  ncclSetThreadName(IbCastPortRecoveryAsyncThread.native_handle(), "NCCL IbResiliencyPortRecoveryAsync");
 
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryThreadStop() {
+ncclResult_t IbCastPortRecoveryThreadStop() {
   if (ncclParamIbResiliencyPortRecovery() == 0) {
     return ncclSuccess;
   }
 
-  if (--ncclIbPortRecoveryRefCount > 0) {
+  if (--IbCastPortRecoveryRefCount > 0) {
     return ncclSuccess;
   }
 
   INFO(NCCL_NET, "NET/IB: %s: Shutting down port recovery async thread", __func__);
 
-  ncclIbPortRecoveryThreadActive.store(false);
-  ncclIbPortRecoveryCond.notify_one();
+  IbCastPortRecoveryThreadActive.store(false);
+  IbCastPortRecoveryCond.notify_one();
 
-  if (ncclIbPortRecoveryAsyncThread.joinable()) {
-    ncclIbPortRecoveryAsyncThread.join();
+  if (IbCastPortRecoveryAsyncThread.joinable()) {
+    IbCastPortRecoveryAsyncThread.join();
   }
 
   INFO(NCCL_NET, "NET/IB: %s: Port recovery async thread stopped", __func__);
   return ncclSuccess;
 }
 
-ncclResult_t ncclIbPortRecoveryHandleFailure(struct ncclIbResiliency* resCtx, int devIndex) {
+ncclResult_t IbCastPortRecoveryHandleFailure(struct IbCastResiliency* resCtx, int devIndex) {
   assert(resCtx != NULL);
   assert(resCtx->recoveryEnabled);
   ncclResult_t res = ncclSuccess;
-  enum ncclIbResiliencyDevState devState = resCtx->devs[devIndex].state.load(std::memory_order_acquire);
-  assert(devState == ncclIbResiliencyDevStateRecoveryInProgress);
-  ncclIbPortRecoveryContext* recoveryCtx = NULL;
+  enum IbCastResiliencyDevState devState = resCtx->devs[devIndex].state.load(std::memory_order_acquire);
+  assert(devState == IbCastResiliencyDevStateRecoveryInProgress);
+  IbCastPortRecoveryContext* recoveryCtx = NULL;
 
-  res = ncclIbPortRecoveryContextInit(resCtx, devIndex, &recoveryCtx);
+  res = IbCastPortRecoveryContextInit(resCtx, devIndex, &recoveryCtx);
   if (res != ncclSuccess) {
     INFO(NCCL_NET,"NET/IB: %s: Failed to initialize recovery context for device %d (comm=%p)", __func__, devIndex, resCtx->baseComm);
     return res;
@@ -1281,12 +1281,12 @@ ncclResult_t ncclIbPortRecoveryHandleFailure(struct ncclIbResiliency* resCtx, in
   // Hold lock while adding to inbox to ensure proper synchronization with
   // the recovery thread
   {
-    std::lock_guard<std::mutex> lock(ncclIbPortRecoveryMutex);
+    std::lock_guard<std::mutex> lock(IbCastPortRecoveryMutex);
     recoveryInbox.push_back(recoveryCtx);
   }
 
   // Wake up the async recovery thread
-  ncclIbPortRecoveryCond.notify_one();
+  IbCastPortRecoveryCond.notify_one();
 
   INFO(NCCL_NET, "NET/IB: %s: Added device %d into the recovery queue (%s comm=%p, devIndex=%d, isSend=%d)", __func__, devIndex, resCtx->baseComm->isSend ? "send" : "recv", resCtx->baseComm, devIndex, resCtx->baseComm->isSend);
   return ncclSuccess;

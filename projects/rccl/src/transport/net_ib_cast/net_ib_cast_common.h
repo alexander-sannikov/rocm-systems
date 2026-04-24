@@ -52,47 +52,47 @@
 
 #define MAXSUFFIXSIZE 16
 #define MAXNAMESIZE (64 + MAXSUFFIXSIZE)
-extern char ncclIbIfName[MAX_IF_NAME_SIZE+1];
-extern union ncclSocketAddress ncclIbIfAddr;
+extern char IbCastIfName[MAX_IF_NAME_SIZE+1];
+extern union ncclSocketAddress IbCastIfAddr;
 
-enum ncclIbRequestMatchingScheme {
+enum IbCastRequestMatchingScheme {
   BY_INDEX=0,
   BY_ID=1,
 };
 
-struct ncclIbMr {
+struct IbCastMr {
   uintptr_t addr;
   size_t pages;
   int refs;
   ibv_mr *mr;
 };
 
-struct ncclIbMrCache {
-  struct ncclIbMr *slots;
+struct IbCastMrCache {
+  struct IbCastMr *slots;
   int capacity, population;
 };
 
 extern int ncclNMergedIbDevs;
 #define NCCL_IB_MAX_DEVS_PER_NIC NCCL_NET_MAX_DEVS_PER_NIC
 #define MAX_MERGED_DEV_NAME (MAXNAMESIZE*NCCL_IB_MAX_DEVS_PER_NIC)+NCCL_IB_MAX_DEVS_PER_NIC
-struct alignas(64) ncclIbMergedDev {
+struct alignas(64) IbCastMergedDev {
   ncclNetVDeviceProps_t vProps;
   int speed;
   char devName[MAX_MERGED_DEV_NAME]; // Up to NCCL_IB_MAX_DEVS_PER_NIC * name size, and a character for each '+'
 };
 
-struct ncclIbStats {
+struct IbCastStats {
   int fatalErrorCount;
 };
 
-enum ncclIbProvider {
+enum IbCastProvider {
   IB_PROVIDER_NONE = 0,
   IB_PROVIDER_MLX5 = 1,
   IB_PROVIDER_MAX = 2,
 };
 
 extern int ncclNIbDevs;
-struct alignas(64) ncclIbDev {
+struct alignas(64) IbCastDev {
   std::mutex mutex;
   int device;
   uint64_t guid;
@@ -108,13 +108,13 @@ struct alignas(64) ncclIbDev {
   int realPort;
   int maxQp;
   float latency;
-  struct ncclIbMrCache mrCache;
+  struct IbCastMrCache mrCache;
   int ar; // ADAPTIVE_ROUTING
   uint32_t oooRqSize;  // valid only when ar=1
   struct ibv_port_attr portAttr;
-  struct ncclIbStats stats;
+  struct IbCastStats stats;
   int dmaBufSupported;
-  enum ncclIbProvider ibProvider;
+  enum IbCastProvider ibProvider;
   union {
     struct {
       int dataDirect;
@@ -124,22 +124,20 @@ struct alignas(64) ncclIbDev {
 
 #define MAX_IB_DEVS  32
 #define MAX_IB_VDEVS MAX_IB_DEVS*8
-extern struct ncclIbMergedDev IbCastMergedDevs[MAX_IB_VDEVS];
-extern struct ncclIbDev IbCastDevs[MAX_IB_DEVS];
-// Alias for files not yet updated to use IbCastDevs
-#define ncclIbDevs IbCastDevs
-extern int ncclIbRelaxedOrderingEnabled;
+extern struct IbCastMergedDev IbCastMergedDevs[MAX_IB_VDEVS];
+extern struct IbCastDev IbCastDevs[MAX_IB_DEVS];
+extern int IbCastRelaxedOrderingEnabled;
 
 extern bool rcclAinicRoce;
 extern bool rcclCtsInlineData;
 extern bool rcclCtsOffloadEnabled;
-extern bool ncclIbUseInline;
-extern int ncclIbGdrFlushDisable;
+extern bool IbCastUseInline;
+extern int IbCastGdrFlushDisable;
 
-enum ncclIbChannelType {
-  ncclIbChannelTypeCts  = 0,
-  ncclIbChannelTypeData = 1,
-  ncclIbChannelTypeMax  = 2
+enum IbCastChannelType {
+  IbCastChannelTypeCts  = 0,
+  IbCastChannelTypeData = 1,
+  IbCastChannelTypeMax  = 2
 };
 
 struct ncclChannelToUd {
@@ -148,15 +146,15 @@ struct ncclChannelToUd {
     bool udAllocated;
 };
 
-extern ncclChannelToUd nccl_channel_ud_map[MAX_IB_DEVS][MAXCHANNELS][ncclIbChannelTypeMax];
-extern bool nccl_channel_last_ud[MAX_IB_DEVS][ncclIbChannelTypeMax];
+extern ncclChannelToUd nccl_channel_ud_map[MAX_IB_DEVS][MAXCHANNELS][IbCastChannelTypeMax];
+extern bool nccl_channel_last_ud[MAX_IB_DEVS][IbCastChannelTypeMax];
 
 #define NCCL_CTS_QP_SLOT_INVALID 0xFF
 
 #define NCCL_IB_LLSTR(ll) (((ll) == IBV_LINK_LAYER_INFINIBAND) ? "IB" : (((ll) == IBV_LINK_LAYER_ETHERNET) ? "RoCE" : "UNSPECIFIED"))
 
 // Per-Dev connection metadata
-struct ncclIbDevInfo {
+struct IbCastDevInfo {
   uint32_t lid;
   uint8_t ib_port;
   enum ibv_mtu mtu;
@@ -166,7 +164,7 @@ struct ncclIbDevInfo {
   union ibv_gid gid;
 
   // The key used for remote access to the addr exchanged by the peers
-  // in ncclIbConnectionMetadata::addr
+  // in IbCastConnectionMetadata::addr
   // This member is populated differently on the sender and on the receiver
   // side.
   // The sender side populates this member with the RKey obtained after it
@@ -182,7 +180,7 @@ struct ncclIbDevInfo {
 };
 
 // Retain local RoCE address for error logging
-struct ncclIbGidInfo {
+struct IbCastGidInfo {
   uint8_t link_layer;
   union ibv_gid localGid;
   int32_t localGidIndex;
@@ -205,14 +203,12 @@ struct ncclProfilerInfo {
 #define NCCL_NET_IB_REQ_FLUSH 3
 #define NCCL_NET_IB_REQ_GIN_IPUT 4
 #define NCCL_NET_IB_REQ_GIN_IGET 5
-// ncclIbReqTypeStr kept for use by resiliency code
-#define ncclIbReqTypeStr IbCastReqTypeStr
 
 // Maximal number of QPs a communicator can have for data transfers
 #define NCCL_IB_MAX_QPS 128
 
 // QP scheduling parameters
-struct ncclIbQpSchedParms {
+struct IbCastQpSchedParms {
   bool enable;
   bool wrrEnable;
   uint64_t updateInterval; // in nsec
@@ -227,23 +223,23 @@ struct ncclIbQpSchedParms {
 };
 
 // Data about QP transmission
-struct ncclIbQpTxData {
+struct IbCastQpTxData {
   uint64_t startTimeNs;
   uint64_t bytes;
 };
 
 // For remapping work request ID so that additional info is avail at
 // completion time of sends
-struct ncclIbRemapWrId {
+struct IbCastRemapWrId {
   int state; // in use or unused
   uint64_t origWrId;
   int qpIndex;
-  struct ncclIbQpTxData tx;
-  struct ncclIbQpSchedParms parms;
+  struct IbCastQpTxData tx;
+  struct IbCastQpSchedParms parms;
 };
 
 // Stats for scheduling QP transmissions
-struct ncclIbQpTxStats {
+struct IbCastQpTxStats {
   uint64_t minRttSample;
   uint64_t totRtt;
   uint64_t numMeasurements;
@@ -251,12 +247,12 @@ struct ncclIbQpTxStats {
 };
 
 // Scratchpad for computing scheduler weights
-struct ncclIbQpTxSchedScratchpad {
+struct IbCastQpTxSchedScratchpad {
   double rtt[NCCL_IB_MAX_QPS];
 };
 
 // Scheduler for QP transmissions
-struct ncclIbQpTxSched {
+struct IbCastQpTxSched {
   double weight;    // fraction of sub-chunk to be transmitted on QP
   double minWeight; // min value of weight used
   double maxWeight; // max value of weight used
@@ -265,24 +261,24 @@ struct ncclIbQpTxSched {
 #define NCCL_IB_TARGET_TOT_TOKENS 100
 
 // Tokens for weighted round-robin QP scheduler
-struct ncclIbRrTokens {
+struct IbCastRrTokens {
   int totTokens;
   int qpTokens[NCCL_IB_MAX_QPS];
 };
 
 // Scheduler for weighted round-robin QP transmissions
-struct ncclIbRrQpTxSched {
-  struct ncclIbRrTokens initTokens;
-  struct ncclIbRrTokens activeTokens;
+struct IbCastRrQpTxSched {
+  struct IbCastRrTokens initTokens;
+  struct IbCastRrTokens activeTokens;
   int qpIndex;
 };
 
 // Control block for staged dynamic scheduling parameters
-struct ncclIbQpSchedParmsCB {
+struct IbCastQpSchedParmsCB {
   ncclFunc_t collType;
   size_t msgSz;
   uint64_t prodEpoch;
-  struct ncclIbQpSchedParms parms;
+  struct IbCastQpSchedParms parms;
 };
 
 #define NCCL_NET_IB_REMAP_UNUSED 0
@@ -290,7 +286,7 @@ struct ncclIbQpSchedParmsCB {
 
 // Tracks data transfers between sender and receiver. A multi-recv/send uses a
 // single record.
-struct ncclIbRequestCompletionRecord {
+struct IbCastRequestCompletionRecord {
   // This array communicates data transfer sizes from the sender to the
   // receiver. The sender writes the size of each completed data transfer to
   // this array. The receiver reads these sizes before reporting completion of
@@ -311,11 +307,11 @@ struct IbCastQpSchedDesc {
   bool wrrSched;
   int nqps;
   int startQpIndex;
-  struct ncclIbQpSchedParms parms;
+  struct IbCastQpSchedParms parms;
 };
 
-struct ncclIbRequest {
-  struct ncclIbNetCommBase* base;
+struct IbCastRequest {
+  struct IbCastNetCommBase* base;
   int type;
   struct ncclSocket* sock;
   // Array of counters. Each element in the array is populated with the expected
@@ -330,7 +326,7 @@ struct ncclIbRequest {
   // poll the device's CQ when the request is tested for progress.
   // The pointers are initialized only for the devices that the request expects
   // to receive completions from.
-  struct ncclIbNetCommDevBase* devBases[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastNetCommDevBase* devBases[NCCL_IB_MAX_DEVS_PER_NIC];
   struct IbCastQpSchedDesc desc;
 #ifdef NCCL_ENABLE_NET_PROFILING
   struct ncclProfilerInfo pInfo[NCCL_NET_IB_MAX_RECVS];
@@ -347,7 +343,7 @@ struct ncclIbRequest {
       bool sentData[NCCL_IB_MAX_QPS];
     } send;
     struct {
-      struct ncclIbRequestCompletionRecord* cmplsRecords;
+      struct IbCastRequestCompletionRecord* cmplsRecords;
       // Aggregates the size of a send request when sender does not write to the
       // completion records array.
       int aggSize;
@@ -362,17 +358,17 @@ struct ncclIbRequest {
   void* ginProxyCtx;
 };
 
-struct ncclIbNetCommDevBase {
+struct IbCastNetCommDevBase {
   int ibDevN;
   struct ibv_pd* pd;
   struct ibv_cq* cq;
   uint64_t pad[2];
-  struct ncclIbGidInfo gidInfo;
+  struct IbCastGidInfo gidInfo;
 };
 
 #define MAX_INLINE_DATA_SIZE 24
 
-struct alignas(64) ncclIbSendFifo {
+struct alignas(64) IbCastSendFifo {
   uint64_t addr;
   int64_t size;
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
@@ -383,7 +379,7 @@ struct alignas(64) ncclIbSendFifo {
   char padding[14];
 };
 
-struct alignas(32) ncclIbSendFifoCtsInline {
+struct alignas(32) IbCastSendFifoCtsInline {
   uint64_t addr;
   uint32_t rkeys[1];
   int size;
@@ -394,14 +390,14 @@ struct alignas(32) ncclIbSendFifoCtsInline {
   char padding[9];
 } __attribute__((packed));
 
-struct ncclIbQpInitAttr {
+struct IbCastQpInitAttr {
   ibv_qp_state state;
   int pkeyIndex;
   uint8_t portNum;
   int qpAccessFlags;
 };
 
-struct ncclIbQpRtrAttr {
+struct IbCastQpRtrAttr {
   enum ibv_mtu mtu;
   uint8_t linkLayer;
   uint8_t tc;
@@ -416,12 +412,12 @@ struct ncclIbQpRtrAttr {
   int32_t localGidIndex;
 };
 
-struct ncclIbQpRtsAttr {
+struct IbCastQpRtsAttr {
   int timeout;
   int retryCnt;
 };
 
-struct ncclIbQp {
+struct IbCastQp {
   struct ibv_qp* qp;
   // The index of the device on which this QP was created on.
   int devIndex;
@@ -433,9 +429,9 @@ struct ncclIbQp {
 
   // Stores the attributes used to configure the QP to allow QP restore after
   // failure.
-  struct ncclIbQpInitAttr initAttr;
-  struct ncclIbQpRtrAttr rtrAttr;
-  struct ncclIbQpRtsAttr rtsAttr;
+  struct IbCastQpInitAttr initAttr;
+  struct IbCastQpRtrAttr rtrAttr;
+  struct IbCastQpRtsAttr rtsAttr;
 
   // The index of the device on the remote side to which this QP is connected
   // to.
@@ -449,7 +445,7 @@ struct ncclIbQp {
 static_assert(NET_IB_MAX_REQUESTS <= 256, "request id are encoded in wr_id and we need up to 8 requests ids per completion");
 
 // Structure to describe the completion records on the sender side.
-struct ncclIbRemCompletionsRecords {
+struct IbCastRemCompletionsRecords {
   // A "shadow" structure of the receiver's completion records in which the
   // sender tracks the completion records locally on its side. Sender uses this
   // memory to place the records it writes/reads to/from the receiver's
@@ -464,8 +460,8 @@ struct ncclIbRemCompletionsRecords {
 };
 
 // A per-dev struct for netIbSendComm
-struct alignas(8) ncclIbSendCommDev {
-  struct ncclIbNetCommDevBase base;
+struct alignas(8) IbCastSendCommDev {
+  struct IbCastNetCommDevBase base;
   struct ibv_mr* fifoMr;
   struct ibv_mr* putSignalScratchpadMr;
   struct ibv_mr* cmplsRecordsMr;
@@ -475,21 +471,21 @@ struct alignas(8) ncclIbSendCommDev {
 
 
 // Wrapper to track an MR per-device, if needed
-struct ncclIbMrHandle {
+struct IbCastMrHandle {
   ibv_mr* mrs[NCCL_IB_MAX_DEVS_PER_NIC];
 };
 
 // Forward declaration
-struct ncclIbResiliency;
+struct IbCastResiliency;
 
-struct alignas(32) ncclIbNetCommBase {
+struct alignas(32) IbCastNetCommBase {
   ncclNetVDeviceProps_t vProps;
   bool isSend;
-  struct ncclIbRequest reqs[NET_IB_MAX_REQUESTS];
-  struct ncclIbQp qps[NCCL_IB_MAX_QPS];
+  struct IbCastRequest reqs[NET_IB_MAX_REQUESTS];
+  struct IbCastQp qps[NCCL_IB_MAX_QPS];
   // Array of pointers to the "actual" QPs that are used for data transfers.
-  // The pointers point to QPs in the ncclIbNetCommBase::qps[] array.
-  struct ncclIbQp* activeQps[NCCL_IB_MAX_QPS];
+  // The pointers point to QPs in the IbCastNetCommBase::qps[] array.
+  struct IbCastQp* activeQps[NCCL_IB_MAX_QPS];
   uint64_t fifoHead;
   int nqps;
   int splitDataOnQps;
@@ -501,24 +497,24 @@ struct alignas(32) ncclIbNetCommBase {
   bool localOooRq;
   int recvMatchingScheme;
   int nDataQps;
-  struct ncclIbDevInfo remDevs[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastDevInfo remDevs[NCCL_IB_MAX_DEVS_PER_NIC];
   // statistics about the comm
-  struct ncclIbStats stats;
-  struct ncclIbResiliency* resiliency;
+  struct IbCastStats stats;
+  struct IbCastResiliency* resiliency;
 
   // QP scheduling members
-  struct ncclIbRemapWrId remapWrId[NET_IB_MAX_REQUESTS];
-  struct ncclIbQpTxStats qpTxStats[NCCL_IB_MAX_QPS];
+  struct IbCastRemapWrId remapWrId[NET_IB_MAX_REQUESTS];
+  struct IbCastQpTxStats qpTxStats[NCCL_IB_MAX_QPS];
   uint64_t nextQpTxStatsResetNs;
-  struct ncclIbQpTxSched qpTxSched[NCCL_IB_MAX_QPS];
-  struct ncclIbRrQpTxSched rrQpTxSched;
+  struct IbCastQpTxSched qpTxSched[NCCL_IB_MAX_QPS];
+  struct IbCastRrQpTxSched rrQpTxSched;
   bool qpTxSchedInit;
   uint64_t nextQpTxSchedUpdateNs;
   uint64_t nextSchedLogNs;
   int remapHead;
   uint64_t stagedParmsConEpoch;
   bool schedParmsInit;
-  struct ncclIbQpSchedParms schedParms;
+  struct IbCastQpSchedParms schedParms;
   bool resetRttDone;
   int isP2p;
   int rxPosts[NCCL_IB_MAX_QPS * NCCL_NET_IB_MAX_RECVS];
@@ -528,16 +524,11 @@ struct alignas(32) ncclIbNetCommBase {
   uint8_t _pad_qpdev[24]; // padding to keep struct size a multiple of 32
 };
 
-struct ncclIbNetCommDevBase* IbCastGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex); // forward decl
-
-// Alias for backwards compatibility with resiliency code
-static inline struct ncclIbNetCommDevBase* ncclIbGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex) {
-  return IbCastGetNetCommDevBase(base, devIndex);
-}
+struct IbCastNetCommDevBase* IbCastGetNetCommDevBase(IbCastNetCommBase* base, int devIndex); // forward decl
 
 // qpIndex is the index relative to a device.
 // For example, if a device has 2 QPs, qpIndex can be 0 or 1.
-static inline ncclResult_t ncclIbCommBaseGetQpByIndex(struct ncclIbNetCommBase* commBase, int devIndex, int qpIndex, ncclIbQp** qp) {
+static inline ncclResult_t IbCastCommBaseGetQpByIndex(struct IbCastNetCommBase* commBase, int devIndex, int qpIndex, IbCastQp** qp) {
   assert(devIndex >= 0 && devIndex < commBase->vProps.ndevs);
   *qp = commBase->activeQps[commBase->vProps.ndevs*qpIndex + devIndex];
   return ncclSuccess;
@@ -551,7 +542,7 @@ static inline ncclResult_t ncclIbCommBaseGetQpByIndex(struct ncclIbNetCommBase* 
 // The function outputs the selected QP in the outQp argument and populates the
 // outQpIndex argument with the index of the selected QP. Note that the
 // outQpIndex is the index of the QP in the base::qps[] array.
-static inline ncclResult_t ncclIbCommBaseGetQpForRequest(struct ncclIbNetCommBase* baseComm, const uint64_t id, const uint8_t qpIndex, ncclIbQp** outQp, int* outQpIndex) {
+static inline ncclResult_t IbCastCommBaseGetQpForRequest(struct IbCastNetCommBase* baseComm, const uint64_t id, const uint8_t qpIndex, IbCastQp** outQp, int* outQpIndex) {
   *outQpIndex = (id + qpIndex) % baseComm->nqps;
   *outQp = baseComm->activeQps[*outQpIndex];
   assert(*outQp != NULL);
@@ -559,8 +550,8 @@ static inline ncclResult_t ncclIbCommBaseGetQpForRequest(struct ncclIbNetCommBas
 }
 
 // Get a QP object from a QP number. If not NULL, qpIndex will also return the
-// index of the QP in the ncclIbNetCommBase::qps[] array.
-static inline ncclResult_t ncclIbCommBaseGetQpByQpNum(struct ncclIbNetCommBase* commBase, int devIndex, uint32_t qpNum, ncclIbQp** qp, int* qpIndex) {
+// index of the QP in the IbCastNetCommBase::qps[] array.
+static inline ncclResult_t IbCastCommBaseGetQpByQpNum(struct IbCastNetCommBase* commBase, int devIndex, uint32_t qpNum, IbCastQp** qp, int* qpIndex) {
   assert(devIndex >= 0 && devIndex < commBase->vProps.ndevs);
   assert(qp != NULL);
   TRACE(NCCL_NET, "NET/IB: %s: Looking for QP num %u on devIndex %d among %d QPs", __func__, qpNum, devIndex, commBase->nqps / commBase->vProps.ndevs);
@@ -580,20 +571,20 @@ static inline ncclResult_t ncclIbCommBaseGetQpByQpNum(struct ncclIbNetCommBase* 
 // Each request is transfered over all devices, and depending on the
 // "splitDataOnQps" configuration parameter, a request may be transffered over
 // a single QP per device or on all QPs of each device.
-static inline int ncclIbCommBaseGetNqpsPerRequest(struct ncclIbNetCommBase* baseComm) {
+static inline int IbCastCommBaseGetNqpsPerRequest(struct IbCastNetCommBase* baseComm) {
   assert(baseComm->nDataQps != -1);
   assert(baseComm->nqps != -1);
   return (baseComm->splitDataOnQps == 1) ? baseComm->nqps : baseComm->nDataQps;
 }
 
-static inline ncclResult_t ncclIbPostRecvWorkRequest(struct ibv_qp* qp, struct ibv_recv_wr* wr) {
+static inline ncclResult_t IbCastPostRecvWorkRequest(struct ibv_qp* qp, struct ibv_recv_wr* wr) {
   struct ibv_recv_wr* bad_wr;
   NCCLCHECK(wrap_ibv_post_recv(qp, wr, &bad_wr));
   return ncclSuccess;
 }
 
 // Sizes FIFO for multi-recv sends (legacy approach)
-struct ncclIbRemSizesFifo {
+struct IbCastRemSizesFifo {
   int elems[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   uint64_t addr;
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
@@ -601,8 +592,8 @@ struct ncclIbRemSizesFifo {
   struct ibv_sge sge;
 };
 
-struct ncclIbSendComm {
-  struct ncclIbNetCommBase base;
+struct IbCastSendComm {
+  struct IbCastNetCommBase base;
   // Start with CTS FIFO and ibv structs as they have alignment restrictions
 
   // CTS FIFO from which the sender reads the Clear-to-Send (CTS) messages that
@@ -610,53 +601,53 @@ struct ncclIbSendComm {
   // issuing a (multi-)receive request). Each row in the 2D array corresponds
   // to a single CTS message but can describe multiple recv-requests issued
   // on the receiver side.
-  struct ncclIbSendFifo ctsFifo[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
+  struct IbCastSendFifo ctsFifo[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   struct ibv_sge sges[NCCL_NET_IB_MAX_RECVS];
   struct ibv_send_wr wrs[NCCL_NET_IB_MAX_RECVS + 1];
   // Each dev correlates to a mergedIbDev
-  struct ncclIbSendCommDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
+  struct IbCastSendCommDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
   // Array of pointers to store the send requests for faster access. The
-  // pointers are pointing into requests stored in ncclIbNetCommBase::reqs[]
+  // pointers are pointing into requests stored in IbCastNetCommBase::reqs[]
   // array. The requests are inserted to this array based on the "slot" they
   // are associated with.
-  struct ncclIbRequest* sendReqs[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
+  struct IbCastRequest* sendReqs[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
 
   // Counter per "slot" on how many send request were called for a multi-recv
   int sendReqsCnt[NET_IB_MAX_REQUESTS];
-  struct ncclIbRemCompletionsRecords remCmplsRecords;
+  struct IbCastRemCompletionsRecords remCmplsRecords;
   int ar; // Use adaptive routing when all merged devices have it enabled
   uint64_t putSignalScratchpad;
-  struct ncclIbSendFifoCtsInline fifo_inline[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
-  struct ncclIbRemSizesFifo remSizesFifo;
+  struct IbCastSendFifoCtsInline fifo_inline[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
+  struct IbCastRemSizesFifo remSizesFifo;
 };
 // The SendFifo needs to be 32-byte aligned and each element needs
 // to be a 32-byte multiple, so that an entry does not get split and
 // written out of order when IB Relaxed Ordering is enabled
-static_assert((sizeof(struct ncclIbNetCommBase) % 32) == 0, "ncclIbNetCommBase size must be 32-byte multiple to ensure ctsFifo is at proper offset");
-static_assert((offsetof(struct ncclIbSendComm, ctsFifo) % 32) == 0, "ncclIbSendComm ctsFifo must be 32-byte aligned");
-static_assert((sizeof(struct ncclIbSendFifo) % 32) == 0, "ncclIbSendFifo element size must be 32-byte multiples");
-static_assert((sizeof(struct ncclIbSendFifoCtsInline) % 32) == 0, "ncclIbSendFifoCtsInline element size must be 32-byte multiples");
-static_assert((offsetof(struct ncclIbSendComm, sges) % 32) == 0, "sges must be 32-byte aligned");
-static_assert((offsetof(struct ncclIbSendComm, wrs) % 32) == 0, "wrs must be 32-byte aligned");
+static_assert((sizeof(struct IbCastNetCommBase) % 32) == 0, "IbCastNetCommBase size must be 32-byte multiple to ensure ctsFifo is at proper offset");
+static_assert((offsetof(struct IbCastSendComm, ctsFifo) % 32) == 0, "IbCastSendComm ctsFifo must be 32-byte aligned");
+static_assert((sizeof(struct IbCastSendFifo) % 32) == 0, "IbCastSendFifo element size must be 32-byte multiples");
+static_assert((sizeof(struct IbCastSendFifoCtsInline) % 32) == 0, "IbCastSendFifoCtsInline element size must be 32-byte multiples");
+static_assert((offsetof(struct IbCastSendComm, sges) % 32) == 0, "sges must be 32-byte aligned");
+static_assert((offsetof(struct IbCastSendComm, wrs) % 32) == 0, "wrs must be 32-byte aligned");
 
-struct ncclIbGpuFlush {
+struct IbCastGpuFlush {
   struct ibv_mr* hostMr;
   struct ibv_mr* gpuMr;
   int* gpuFlushGpuMem;
   int dmabuf_fd;
   struct ibv_sge sge;
-  struct ncclIbQp qp;
+  struct IbCastQp qp;
 };
 
 // This structure describes the FIFO which the receiver uses when it sends CTS
 // messages to the sender.
-struct ncclIbRemCtsFifo {
+struct IbCastRemCtsFifo {
   // A "shadow" structure of the sender's CTS FIFO in which the receiver tracks
   // the CTS FIFO locally on its side. Receiver uses this memory to place the
   // CTS messages and populates the RDMA message "gather address" with the
   // memory of the CTS message that is sent.
-  struct ncclIbSendFifo elems[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
-  struct ncclIbSendFifoCtsInline elems_cts_inline[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
+  struct IbCastSendFifo elems[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
+  struct IbCastSendFifoCtsInline elems_cts_inline[NET_IB_MAX_REQUESTS][NCCL_NET_IB_MAX_RECVS];
   uint64_t addr;
   // Array of RKeys (one RKey per device) from which the receiver chooses the
   // RKey (depending on the device being used) when it posts a CTS to the
@@ -667,9 +658,9 @@ struct ncclIbRemCtsFifo {
   uint64_t fifoTail;
 };
 
-struct alignas(16) ncclIbRecvCommDev {
-  struct ncclIbNetCommDevBase base;
-  struct ncclIbGpuFlush gpuFlush;
+struct alignas(16) IbCastRecvCommDev {
+  struct IbCastNetCommDevBase base;
+  struct IbCastGpuFlush gpuFlush;
   // MR that is obtained after registering the "shadow" CTS FIFO on the
   // receiver's side. The LKey of this MR allows RDMA operations on the receiver
   // side to gather CTS messages (formatted by the receiver) and write them to
@@ -689,20 +680,20 @@ struct alignas(16) ncclIbRecvCommDev {
 
 #define NCCL_IB_RECV_WR_ID_DUMMY UINT64_MAX
 
-struct ncclIbRecvComm {
-  struct ncclIbNetCommBase base;
-  struct ncclIbRecvCommDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
+struct IbCastRecvComm {
+  struct IbCastNetCommBase base;
+  struct IbCastRecvCommDev devs[NCCL_IB_MAX_DEVS_PER_NIC];
   // Array of pointers to store the recv requests to allow faster access. The
-  // pointers are pointing into requests stored in ncclIbNetCommBase::reqs[]
+  // pointers are pointing into requests stored in IbCastNetCommBase::reqs[]
   // array. The requests are inserted to this array using a hash (modulo) on
   // their ID.
-  struct ncclIbRequest* recvReqs[NET_IB_MAX_REQUESTS];
+  struct IbCastRequest* recvReqs[NET_IB_MAX_REQUESTS];
   // Structure to hold all the related structures regarding the CTS FIFO
   // structure.
-  struct ncclIbRemCtsFifo remFifo;
+  struct IbCastRemCtsFifo remFifo;
   // Structure to hold all the completion records of all the outstanding
   // receive requests on the receiver side.
-  struct ncclIbRequestCompletionRecord cmplsRecords[NET_IB_MAX_REQUESTS];
+  struct IbCastRequestCompletionRecord cmplsRecords[NET_IB_MAX_REQUESTS];
   int gpuFlushHostMem;
   int flushEnabled;
   bool prepostReceiveWorkRequests;
@@ -710,13 +701,13 @@ struct ncclIbRecvComm {
   // and only the wr_id is updated before posting a receive work request.
   struct ibv_recv_wr ibRecvWorkRequest;
 };
-static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm ctsFifo must be 32-byte aligned");
+static_assert((offsetof(struct IbCastRecvComm, remFifo) % 32) == 0, "IbCastRecvComm ctsFifo must be 32-byte aligned");
 
-ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend);
-ncclResult_t ncclIbRecvCommInit(struct ncclIbRecvComm* recvComm);
-ncclResult_t ncclIbSendCommInit(struct ncclIbSendComm* sendComm);
+ncclResult_t IbCastBaseCommInit(struct IbCastNetCommBase* baseComm, bool isSend);
+ncclResult_t IbCastRecvCommInit(struct IbCastRecvComm* recvComm);
+ncclResult_t IbCastSendCommInit(struct IbCastSendComm* sendComm);
 
-struct ncclIbCommStage; // forward declaration; full definition in connect.h
+struct IbCastCommStage; // forward declaration; full definition in connect.h
 
 /* NCCLCHECKNOWARN: like NCCLCHECK but only logs at INFO level on failure, does not propagate error */
 #ifndef NCCLCHECKNOWARN
@@ -728,33 +719,29 @@ struct ncclIbCommStage; // forward declaration; full definition in connect.h
 } while (0)
 #endif
 
-struct ncclIbListenComm {
+struct IbCastListenComm {
   int dev;
   struct ncclSocket sock;
-  struct ncclIbCommStage* stage;
+  struct IbCastCommStage* stage;
 };
 
-static ncclResult_t ncclIbStatsInit(struct ncclIbStats* stat) {
+static ncclResult_t IbCastStatsInit(struct IbCastStats* stat) {
   __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
   return ncclSuccess;
 }
-static void ncclIbStatsFatalError(struct ncclIbStats* stat){
+static void IbCastStatsFatalError(struct IbCastStats* stat){
   __atomic_fetch_add(&stat->fatalErrorCount, 1, __ATOMIC_RELAXED);
 }
-static void ncclIbQpFatalError(struct ibv_qp* qp) {
-  ncclIbStatsFatalError((struct ncclIbStats*)qp->qp_context);
+static void IbCastQpFatalError(struct ibv_qp* qp) {
+  IbCastStatsFatalError((struct IbCastStats*)qp->qp_context);
 }
-static void ncclIbCqFatalError(struct ibv_cq* cq) {
-  ncclIbStatsFatalError((struct ncclIbStats*)cq->cq_context);
+static void IbCastCqFatalError(struct ibv_cq* cq) {
+  IbCastStatsFatalError((struct IbCastStats*)cq->cq_context);
 }
-static void ncclIbDevFatalError(struct ncclIbDev* dev) {
-  ncclIbStatsFatalError(&dev->stats);
+static void IbCastDevFatalError(struct IbCastDev* dev) {
+  IbCastStatsFatalError(&dev->stats);
 }
-ncclResult_t IbCastStatsCheckFatalCount(struct ncclIbStats* stat, const char* funcName);
-static ncclResult_t IbCastStatsInit(struct ncclIbStats* stat) {
-  __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
-  return ncclSuccess;
-}
+ncclResult_t IbCastStatsCheckFatalCount(struct IbCastStats* stat, const char* funcName);
 
 extern ncclProfilerCallback_t ncclProfilerFunction;
 
@@ -762,19 +749,19 @@ extern pthread_t IbCastAsyncThread;
 void* IbCastAsyncThreadMain(void* args);
 
 ncclResult_t IbCastGdrSupport();
-ncclResult_t ncclIbPeerMemSupport();
+ncclResult_t IbCastPeerMemSupport();
 ncclResult_t IbCastDmaBufSupport(int dev);
 
-void IbCastAddEvent(struct ncclIbRequest* req, int devIndex, struct ncclIbNetCommDevBase* base, bool ctsEvent);
-ncclResult_t ncclIbGetGidIndex(struct ibv_context *context, uint8_t portNum, struct ibv_port_attr* portAttr, int *gidIndex);
-ncclResult_t IbCastGetRequest(struct ncclIbNetCommBase* base, struct ncclIbRequest** req);
-ncclResult_t IbCastFreeRequest(struct ncclIbRequest* r);
-struct ncclIbNetCommDevBase* IbCastGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex);
+void IbCastAddEvent(struct IbCastRequest* req, int devIndex, struct IbCastNetCommDevBase* base, bool ctsEvent);
+ncclResult_t IbCastGetGidIndex(struct ibv_context *context, uint8_t portNum, struct ibv_port_attr* portAttr, int *gidIndex);
+ncclResult_t IbCastGetRequest(struct IbCastNetCommBase* base, struct IbCastRequest** req);
+ncclResult_t IbCastFreeRequest(struct IbCastRequest* r);
+struct IbCastNetCommDevBase* IbCastGetNetCommDevBase(IbCastNetCommBase* base, int devIndex);
 
-ncclResult_t IbCastRegMrDmaBufInternal(ncclIbNetCommDevBase* base, void* data, size_t size, int type, uint64_t offset, int fd, ibv_mr** mhandle);
+ncclResult_t IbCastRegMrDmaBufInternal(IbCastNetCommDevBase* base, void* data, size_t size, int type, uint64_t offset, int fd, ibv_mr** mhandle);
 
-int ncclIbGetTrafficClass(void* ctx);
-void ncclIbSetTrafficClass(void* ctx, int trafficClass);
+int IbCastGetTrafficClass(void* ctx);
+void IbCastSetTrafficClass(void* ctx, int trafficClass);
 
 extern const char* IbCastReqTypeStr[];
 extern const char* IbCastProviderName[];
@@ -798,31 +785,24 @@ ncclResult_t IbCastCloseSend(void* sendComm);
 ncclResult_t IbCastCloseRecv(void* recvComm);
 ncclResult_t IbCastCloseListen(void* listenComm);
 ncclResult_t IbCastMakeVDevice(int* d, ncclNetVDeviceProps_t* props);
-ncclResult_t ncclIbFinalizeDevices(void);
+ncclResult_t IbCastFinalizeDevices(void);
 ncclResult_t IbCastFinalize(void* ctx);
 ncclResult_t IbCastSetNetAttr(void *ctx, ncclNetAttr_t *netAttr);
 ncclResult_t rcclCastNetP2pPolicy(void* handle, int isP2p);
 
 // Keep net_ib functions still used by net_ib_cast infrastructure
-ncclResult_t ncclIbInitDevices(ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction);
+ncclResult_t IbCastInitDevices(ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction);
 
-// Aliases: gin.cc uses original NCCL naming; map to IbCast-renamed equivalents
-#define ncclIbGetPhysProperties IbCastGetPhysProperties
-#define ncclIbListen            IbCastListen
-#define ncclIbCloseListen       IbCastCloseListen
-#define ncclIbDevices           IbCastDevices
-#define ncclIbGetRequest        IbCastGetRequest
-#define ncclIbFreeRequest       IbCastFreeRequest
-/* ncclIbAddEvent: gin.cc uses 2-arg form (req, devIndex); IbCastAddEvent takes 4 args.
+/* IbCastAddEvent: gin.cc uses 2-arg form (req, devIndex); IbCastAddEvent takes 4 args.
  * This inline wrapper derives base from req->comm and always passes ctsEvent=false. */
-static inline void ncclIbAddEvent(struct ncclIbRequest* req, int devIndex) {
+static inline void IbCastAddEvent(struct IbCastRequest* req, int devIndex) {
   IbCastAddEvent(req, devIndex, IbCastGetNetCommDevBase(req->base, devIndex), false);
 }
-/* ncclIbRegMrDmaBufInternal: gin.cc passes an extra mr_flags arg that IbCastRegMrDmaBufInternal
+/* IbCastRegMrDmaBufInternal: gin.cc passes an extra mr_flags arg that IbCastRegMrDmaBufInternal
  * doesn't have. This wrapper drops mr_flags (unused in RCCL's IB path). */
-static inline ncclResult_t ncclIbRegMrDmaBufInternal(void* comm, void* data, size_t size,
+static inline ncclResult_t IbCastRegMrDmaBufInternal(void* comm, void* data, size_t size,
     int type, uint64_t offset, int fd, uint64_t /*mr_flags*/, void** mhandle) {
-  return IbCastRegMrDmaBufInternal((ncclIbNetCommDevBase*)comm, data, size, type, offset, fd, (ibv_mr**)mhandle);
+  return IbCastRegMrDmaBufInternal((IbCastNetCommDevBase*)comm, data, size, type, offset, fd, (ibv_mr**)mhandle);
 }
 
 /* ibvWcStatusStr / ibvWcOpcodeStr: added in NCCL 2.30.4; libibverbs provides ibv_wc_status_str

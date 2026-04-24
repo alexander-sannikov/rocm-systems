@@ -7,10 +7,10 @@
 
 #include "net_ib_cast_common.h"
 
-ncclResult_t IbCastRegMrDmaBufInternal(ncclIbNetCommDevBase* base, void* data, size_t size, int type, uint64_t offset, int fd, ibv_mr** mhandle) {
+ncclResult_t IbCastRegMrDmaBufInternal(IbCastNetCommDevBase* base, void* data, size_t size, int type, uint64_t offset, int fd, ibv_mr** mhandle) {
   static thread_local uintptr_t pageSize = 0;
   if (pageSize == 0) pageSize = sysconf(_SC_PAGESIZE);
-  struct ncclIbMrCache* cache = &IbCastDevs[base->ibDevN].mrCache;
+  struct IbCastMrCache* cache = &IbCastDevs[base->ibDevN].mrCache;
   uintptr_t addr = (uintptr_t)data & -pageSize;
   size_t pages = ((uintptr_t)data + size - addr + pageSize-1)/pageSize;
   std::lock_guard<std::mutex> lock(IbCastDevs[base->ibDevN].mutex);
@@ -23,7 +23,7 @@ ncclResult_t IbCastRegMrDmaBufInternal(ncclIbNetCommDevBase* base, void* data, s
       // Deregister / register
       struct ibv_mr* mr;
       unsigned int flags = IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ|IBV_ACCESS_REMOTE_ATOMIC;
-      bool relaxedOrdering = ncclIbRelaxedOrderingEnabled;
+      bool relaxedOrdering = IbCastRelaxedOrderingEnabled;
       if (relaxedOrdering) flags |= IBV_ACCESS_RELAXED_ORDERING;
       if (fd != -1) {
         /* DMA-BUF support */
@@ -42,7 +42,7 @@ ncclResult_t IbCastRegMrDmaBufInternal(ncclIbNetCommDevBase* base, void* data, s
         }
       }
       TRACE(NCCL_INIT|NCCL_NET,"regAddr=0x%lx size=%lld rkey=0x%x lkey=0x%x fd=%d", (unsigned long)addr, (long long)pages*pageSize, mr->rkey, mr->lkey, fd);
-      if (slot != cache->population) memmove(cache->slots+slot+1, cache->slots+slot, (cache->population-slot)*sizeof(struct ncclIbMr));
+      if (slot != cache->population) memmove(cache->slots+slot+1, cache->slots+slot, (cache->population-slot)*sizeof(struct IbCastMr));
       cache->slots[slot].addr = addr;
       cache->slots[slot].pages = pages;
       cache->slots[slot].refs = 1;
@@ -64,15 +64,15 @@ ncclResult_t IbCastRegMrDmaBufInternal(ncclIbNetCommDevBase* base, void* data, s
 ncclResult_t IbCastRegMrDmaBuf(void* comm, void* data, size_t size, int type, uint64_t offset, int fd, void** mhandle) {
   ncclResult_t ret = ncclSuccess;
   assert(size > 0);
-  struct ncclIbNetCommBase* base = (struct ncclIbNetCommBase*) comm;
-  struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) malloc(sizeof(struct ncclIbMrHandle));
+  struct IbCastNetCommBase* base = (struct IbCastNetCommBase*) comm;
+  struct IbCastMrHandle* mhandleWrapper = (struct IbCastMrHandle*) malloc(sizeof(struct IbCastMrHandle));
   if (mhandleWrapper == nullptr) {
     WARN("Failed to allocate IB MR handle wrapper");
     return ncclSystemError;
   }
   for (int i = 0; i < base->vProps.ndevs; i++) {
-    // Each ncclIbNetCommDevBase is at different offset in send and recv netComms
-    struct ncclIbNetCommDevBase* devComm = IbCastGetNetCommDevBase(base, i);
+    // Each IbCastNetCommDevBase is at different offset in send and recv netComms
+    struct IbCastNetCommDevBase* devComm = IbCastGetNetCommDevBase(base, i);
     NCCLCHECKGOTO(IbCastRegMrDmaBufInternal(devComm, data, size, type, offset, fd, mhandleWrapper->mrs + i), ret, fail);
   }
   *mhandle = (void*) mhandleWrapper;
@@ -87,13 +87,13 @@ ncclResult_t IbCastRegMr(void* comm, void* data, size_t size, int type, void** m
   return IbCastRegMrDmaBuf(comm, data, size, type, 0ULL, -1, mhandle);
 }
 
-ncclResult_t IbCastDeregMrInternal(ncclIbNetCommDevBase* base, ibv_mr* mhandle) {
-  struct ncclIbMrCache* cache = &IbCastDevs[base->ibDevN].mrCache;
+ncclResult_t IbCastDeregMrInternal(IbCastNetCommDevBase* base, ibv_mr* mhandle) {
+  struct IbCastMrCache* cache = &IbCastDevs[base->ibDevN].mrCache;
   std::lock_guard<std::mutex> lock(IbCastDevs[base->ibDevN].mutex);
   for (int i=0; i < cache->population; i++) {
     if (mhandle == cache->slots[i].mr) {
       if (0 == --cache->slots[i].refs) {
-        memmove(&cache->slots[i], &cache->slots[--cache->population], sizeof(struct ncclIbMr));
+        memmove(&cache->slots[i], &cache->slots[--cache->population], sizeof(struct IbCastMr));
         if (cache->population == 0) {
           free(cache->slots);
           cache->slots = NULL;
@@ -111,11 +111,11 @@ ncclResult_t IbCastDeregMrInternal(ncclIbNetCommDevBase* base, ibv_mr* mhandle) 
 ncclResult_t IbCastDeregMr(void* comm, void* mhandle) {
   if (mhandle == NULL) return ncclSuccess;
 
-  struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandle;
-  struct ncclIbNetCommBase* base = (struct ncclIbNetCommBase*) comm;
+  struct IbCastMrHandle* mhandleWrapper = (struct IbCastMrHandle*) mhandle;
+  struct IbCastNetCommBase* base = (struct IbCastNetCommBase*) comm;
   for (int i = 0; i < base->vProps.ndevs; i++) {
-    // Each ncclIbNetCommDevBase is at different offset in send and recv netComms
-    struct ncclIbNetCommDevBase* devComm = IbCastGetNetCommDevBase(base, i);
+    // Each IbCastNetCommDevBase is at different offset in send and recv netComms
+    struct IbCastNetCommDevBase* devComm = IbCastGetNetCommDevBase(base, i);
     NCCLCHECK(IbCastDeregMrInternal(devComm, mhandleWrapper->mrs[i]));
   }
   free(mhandleWrapper);
