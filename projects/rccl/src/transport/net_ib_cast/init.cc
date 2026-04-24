@@ -5,8 +5,11 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#include "common.h"
+#include "net_ib_cast_common.h"
 #include "p2p_resiliency_recovery.h"
+
+extern ncclResult_t pciPathToInt64(char* path, int offset, int minOffset, int64_t* id);
+extern int64_t ncclParamIbCastSplitDataOnQps();
 
 NCCL_PARAM(IbCastGidIndex, "IB_GID_INDEX", -1);
 NCCL_PARAM(IbCastRoutableFlidIbGidIndex, "IB_ROUTABLE_FLID_GID_INDEX", 1);
@@ -28,6 +31,7 @@ RCCL_PARAM(IbCastQpsPerP2p, "IB_QPS_PER_P2P", 0);
 NCCL_PARAM(IbCastGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 RCCL_PARAM(IbCastCtsInlineData, "CTS_INLINE_DATA", -1);
 RCCL_PARAM(IbCastCtsOffloadEnabled, "CTS_OFFLOAD_ENABLED", -1);
+RCCL_PARAM(IbCastGdrFlushGpuMemNoRelaxedOrdering, "GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING", 1);
 
 extern int64_t rcclParamAinicRoce();
 
@@ -119,8 +123,8 @@ static int ncclIbCompareDevs(const void* dev1, const void* dev2) {
   if (strlen(path1) == 0 || strlen(path2) == 0) return strlen(path2) - strlen(path1);
 
   int64_t id1, id2;
-  pciPathToInt64(path1, &id1);
-  pciPathToInt64(path2, &id2);
+  pciPathToInt64(path1, strlen(path1), 0, &id1);
+  pciPathToInt64(path2, strlen(path2), 0, &id2);
 
   return (id1 < id2) ? -1 : ((id1 == id2) ? 0 : 1);
 }
@@ -137,7 +141,7 @@ static ncclResult_t ncclIbGetPciPath(char* devName, char** path, char* fullPath)
     // Merge multi-port NICs into the same PCI device
     p[strlen(p)-1] = '0';
     // Also merge virtual functions (VF) into the same device
-    if (ncclParamIbMergeVfs()) p[strlen(p)-3] = p[strlen(p)-4] = '0';
+    if (ncclParamIbCastMergeVfs()) p[strlen(p)-3] = p[strlen(p)-4] = '0';
   }
   if (path) {
     *path = p;
@@ -782,8 +786,7 @@ ncclResult_t IbCastGetPhysProperties(int dev, ncclNetProperties_t* props) {
   props->maxP2pBytes = NCCL_MAX_NET_SIZE_BYTES;
   props->maxCollBytes = MAX_COLLNET_SIZE;
   props->maxMultiRequestSize = 1;
-  props->railId = NCCL_NET_ID_UNDEF;
-  props->planeId = NCCL_NET_ID_UNDEF;
+  /* props->railId and props->planeId: NCCL 2.30.4 fields, not in RCCL's ncclNetProperties_v11_t */
   return ncclSuccess;
 }
 

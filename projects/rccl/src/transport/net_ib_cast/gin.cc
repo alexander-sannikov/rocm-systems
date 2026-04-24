@@ -5,7 +5,7 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#include "common.h"
+#include "net_ib_cast_common.h"
 
 #include "gin/gin_host.h"
 #include "gin.h"
@@ -18,10 +18,10 @@ static ncclResult_t ncclGinIbGdrSupport(bool* gdrSupport, bool gdaki) {
   *gdrSupport = true;
   bool peerMemSupport =
      gdaki ? ncclIbPeerMemSupport() == ncclSuccess : // GDAKI does not support nv_peer_mem.
-     ncclIbGdrSupport() == ncclSuccess;
+     IbCastGdrSupport() == ncclSuccess;
   if (peerMemSupport) return ncclSuccess;
 
-  if (ncclIbDmaBufSupport(0) == ncclSuccess) return ncclSuccess;
+  if (IbCastDmaBufSupport(0) == ncclSuccess) return ncclSuccess;
 
   *gdrSupport = false;
   INFO(NCCL_NET, "Unable to use GIN: Peermem is not supported, nor DMA-BUF.");
@@ -32,16 +32,14 @@ static ncclResult_t ncclGinIbGdrSupport(bool* gdrSupport, bool gdaki) {
 static ncclResult_t ncclGinIbGdrGpuSupport(bool gdaki) {
   bool peerMemSupport =
      gdaki ? ncclIbPeerMemSupport() == ncclSuccess : // GDAKI does not support nv_peer_mem.
-     ncclIbGdrSupport() == ncclSuccess;
+     IbCastGdrSupport() == ncclSuccess;
   if (peerMemSupport) return ncclSuccess;
 
   int cudaDev;
-  CUDACHECK(cudaGetDevice(&cudaDev));
-  int dmaBufSupportOnDevice = 1;
-  CUCHECK(cuDeviceGetAttribute(&dmaBufSupportOnDevice, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, cudaDev));
-  if (dmaBufSupportOnDevice == 1) return ncclSuccess;
-
-  WARN("Unable to use GIN: Peermem is not supported, and device %d does not support DMA-BUF.", cudaDev);
+  CUDACHECK(hipGetDevice(&cudaDev));
+  /* ROCm: hipDeviceGetAttribute does not expose a DMA-BUF attribute; treat as unsupported. */
+  (void)cudaDev;
+  WARN("Unable to use GIN: Peermem is not supported, and DMA-BUF GPU check unavailable on ROCm.");
   return ncclInvalidUsage;
 }
 
@@ -236,7 +234,7 @@ ncclResult_t ncclGinIbConnect(void *ctx, void *handles[], int nranks, int rank,
       NCCLCHECK(ncclNetIb.accept(lComm, &cComm->recvComm, NULL));
   } while (cComm->sendComm == NULL || cComm->recvComm == NULL);
 
-  cComm->getProperties = (ncclResult_t(*)(int dev, void *props))ncclIbGetProperties;
+  cComm->getProperties = (ncclResult_t(*)(int dev, void *props))IbCastGetProperties;
   cComm->allGather = ncclGinIbAllGather;
   cComm->allToAll = ncclGinIbAllToAll;
   cComm->getGidIndex = ncclIbGetGidIndex;

@@ -7,8 +7,8 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#ifndef NET_IB_COMMON_H_
-#define NET_IB_COMMON_H_
+#ifndef NET_IB_CAST_COMMON_H_
+#define NET_IB_CAST_COMMON_H_
 
 #include "nccl.h"
 #include "core.h"
@@ -27,6 +27,9 @@
 #include <poll.h>
 #include <sys/types.h>
 #include <unistd.h>
+#ifdef __HIPCC__
+#include "hip/hip_runtime.h"
+#endif
 #include <mutex>
 #include <climits>
 #define ENABLE_TIMER 0
@@ -519,7 +522,13 @@ struct alignas(32) ncclIbNetCommBase {
   bool resetRttDone;
   int isP2p;
   int rxPosts[NCCL_IB_MAX_QPS * NCCL_NET_IB_MAX_RECVS];
+  // Round-robin QP/device scheduling indices (added in NCCL 2.30.4)
+  int qpIndex;
+  int devIndex;
+  uint8_t _pad_qpdev[24]; // padding to keep struct size a multiple of 32
 };
+
+struct ncclIbNetCommDevBase* IbCastGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex); // forward decl
 
 // Alias for backwards compatibility with resiliency code
 static inline struct ncclIbNetCommDevBase* ncclIbGetNetCommDevBase(ncclIbNetCommBase* base, int devIndex) {
@@ -654,6 +663,8 @@ struct ncclIbRemCtsFifo {
   // sender
   uint32_t rkeys[NCCL_IB_MAX_DEVS_PER_NIC];
   uint32_t flags;
+  // Tail index tracking CTS FIFO slot (added in NCCL 2.30.4)
+  uint64_t fifoTail;
 };
 
 struct alignas(16) ncclIbRecvCommDev {
@@ -699,11 +710,23 @@ struct ncclIbRecvComm {
   // and only the wr_id is updated before posting a receive work request.
   struct ibv_recv_wr ibRecvWorkRequest;
 };
-static_assert((offsetof(struct ncclIbRecvComm, remCtsFifo) % 32) == 0, "ncclIbRecvComm ctsFifo must be 32-byte aligned");
+static_assert((offsetof(struct ncclIbRecvComm, remFifo) % 32) == 0, "ncclIbRecvComm ctsFifo must be 32-byte aligned");
 
 ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend);
 ncclResult_t ncclIbRecvCommInit(struct ncclIbRecvComm* recvComm);
 ncclResult_t ncclIbSendCommInit(struct ncclIbSendComm* sendComm);
+
+struct ncclIbCommStage; // forward declaration; full definition in connect.h
+
+/* NCCLCHECKNOWARN: like NCCLCHECK but only logs at INFO level on failure, does not propagate error */
+#ifndef NCCLCHECKNOWARN
+#define NCCLCHECKNOWARN(call, flag) do { \
+  ncclResult_t _res = (call); \
+  if (_res != ncclSuccess) { \
+    INFO(flag, "Call to " #call " failed with error %s", ncclGetErrorString(_res)); \
+  } \
+} while (0)
+#endif
 
 struct ncclIbListenComm {
   int dev;
@@ -712,11 +735,11 @@ struct ncclIbListenComm {
 };
 
 static ncclResult_t ncclIbStatsInit(struct ncclIbStats* stat) {
-  COMPILER_ATOMIC_STORE(&stat->fatalErrorCount, 0, std::memory_order_relaxed);
+  __atomic_store_n(&stat->fatalErrorCount, 0, __ATOMIC_RELAXED);
   return ncclSuccess;
 }
 static void ncclIbStatsFatalError(struct ncclIbStats* stat){
-  COMPILER_ATOMIC_FETCH_ADD(&stat->fatalErrorCount, 1, std::memory_order_relaxed);
+  __atomic_fetch_add(&stat->fatalErrorCount, 1, __ATOMIC_RELAXED);
 }
 static void ncclIbQpFatalError(struct ibv_qp* qp) {
   ncclIbStatsFatalError((struct ncclIbStats*)qp->qp_context);
@@ -782,6 +805,44 @@ ncclResult_t rcclCastNetP2pPolicy(void* handle, int isP2p);
 
 // Keep net_ib functions still used by net_ib_cast infrastructure
 ncclResult_t ncclIbInitDevices(ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction);
+
+// Aliases: gin.cc uses original NCCL naming; map to IbCast-renamed equivalents
+#define ncclIbGetPhysProperties IbCastGetPhysProperties
+#define ncclIbListen            IbCastListen
+#define ncclIbCloseListen       IbCastCloseListen
+#define ncclIbDevices           IbCastDevices
+#define ncclIbGetRequest        IbCastGetRequest
+#define ncclIbFreeRequest       IbCastFreeRequest
+/* ncclIbAddEvent: gin.cc uses 2-arg form (req, devIndex); IbCastAddEvent takes 4 args.
+ * This inline wrapper derives base from req->comm and always passes ctsEvent=false. */
+static inline void ncclIbAddEvent(struct ncclIbRequest* req, int devIndex) {
+  IbCastAddEvent(req, devIndex, IbCastGetNetCommDevBase(req->base, devIndex), false);
+}
+/* ncclIbRegMrDmaBufInternal: gin.cc passes an extra mr_flags arg that IbCastRegMrDmaBufInternal
+ * doesn't have. This wrapper drops mr_flags (unused in RCCL's IB path). */
+static inline ncclResult_t ncclIbRegMrDmaBufInternal(void* comm, void* data, size_t size,
+    int type, uint64_t offset, int fd, uint64_t /*mr_flags*/, void** mhandle) {
+  return IbCastRegMrDmaBufInternal((ncclIbNetCommDevBase*)comm, data, size, type, offset, fd, (ibv_mr**)mhandle);
+}
+
+/* ibvWcStatusStr / ibvWcOpcodeStr: added in NCCL 2.30.4; libibverbs provides ibv_wc_status_str
+ * but not ibv_wc_opcode_str, so we supply both as inline wrappers. */
+static inline const char* ibvWcStatusStr(enum ibv_wc_status status) {
+  return ibv_wc_status_str(status);
+}
+static inline const char* ibvWcOpcodeStr(enum ibv_wc_opcode opcode) {
+  switch (opcode) {
+    case IBV_WC_SEND:       return "SEND";
+    case IBV_WC_RDMA_WRITE: return "RDMA_WRITE";
+    case IBV_WC_RDMA_READ:  return "RDMA_READ";
+    case IBV_WC_COMP_SWAP:  return "COMP_SWAP";
+    case IBV_WC_FETCH_ADD:  return "FETCH_ADD";
+    case IBV_WC_BIND_MW:    return "BIND_MW";
+    case IBV_WC_RECV:       return "RECV";
+    case IBV_WC_RECV_RDMA_WITH_IMM: return "RECV_RDMA_WITH_IMM";
+    default:                return "UNKNOWN";
+  }
+}
 
 #endif
 

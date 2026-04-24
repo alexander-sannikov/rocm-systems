@@ -8,7 +8,7 @@
 #ifndef NET_IB_P2P_RESILIENCY_H_
 #define NET_IB_P2P_RESILIENCY_H_
 
-#include "common.h"
+#include "net_ib_cast_common.h"
 #include "connect.h"
 
 enum ncclIbResiliencyDevState {

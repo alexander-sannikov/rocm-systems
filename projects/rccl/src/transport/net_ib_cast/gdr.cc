@@ -5,7 +5,9 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#include "common.h"
+#include "net_ib_cast_common.h"
+
+extern int64_t ncclParamIbCastPciRelaxedOrdering();
 
 // Introduce RCCL_FORCE_ENABLE_GDRDMA to force load GPU-NIC RDMA module
 // Use ONLY for debugging!

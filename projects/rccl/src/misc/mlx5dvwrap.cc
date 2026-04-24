@@ -8,6 +8,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <mutex>
+#include <dlfcn.h>
 
 #ifdef NCCL_BUILD_MLX5DV
 #include <infiniband/mlx5dv.h>
@@ -70,4 +71,43 @@ struct ibv_mr * wrap_direct_mlx5dv_reg_dmabuf_mr(struct ibv_pd *pd, uint64_t off
     return NULL;
   }
   return mlx5dvSymbols.mlx5dv_internal_reg_dmabuf_mr(pd, offset, length, iova, fd, access, mlx5_access);
+}
+
+/* OOO RQ capability query — dynamically resolved at runtime. Returns ncclInternalError if unavailable. */
+ncclResult_t wrap_mlx5dv_query_device(struct ibv_context *context, struct mlx5dv_context *attrs_out) {
+#ifdef NCCL_BUILD_MLX5DV
+  int ret = mlx5dv_query_device(context, attrs_out);
+  if (ret != 0) return ncclInternalError;
+  return ncclSuccess;
+#else
+  typedef int (*mlx5dv_query_device_fn)(struct ibv_context*, struct mlx5dv_context*);
+  static mlx5dv_query_device_fn fn = NULL;
+  static bool resolved = false;
+  if (!resolved) {
+    fn = (mlx5dv_query_device_fn)dlsym(RTLD_DEFAULT, "mlx5dv_query_device");
+    resolved = true;
+  }
+  if (fn == NULL) return ncclInternalError;
+  int ret = fn(context, attrs_out);
+  if (ret != 0) return ncclInternalError;
+  return ncclSuccess;
+#endif
+}
+
+/* OOO QP creation — AINIC path. Dynamically resolved at runtime; returns NULL if unavailable. */
+struct ibv_qp * wrap_mlx5dv_create_qp(struct ibv_context *context, struct ibv_qp_init_attr_ex *qp_attr, struct mlx5dv_qp_init_attr *mlx5_qp_attr) {
+#ifdef NCCL_BUILD_MLX5DV
+  return mlx5dv_create_qp(context, qp_attr, mlx5_qp_attr);
+#else
+  /* Dynamic lookup via dlsym — fall back to NULL if mlx5dv_create_qp not available */
+  typedef struct ibv_qp* (*mlx5dv_create_qp_fn)(struct ibv_context*, struct ibv_qp_init_attr_ex*, struct mlx5dv_qp_init_attr*);
+  static mlx5dv_create_qp_fn fn = NULL;
+  static bool resolved = false;
+  if (!resolved) {
+    fn = (mlx5dv_create_qp_fn)dlsym(RTLD_DEFAULT, "mlx5dv_create_qp");
+    resolved = true;
+  }
+  if (fn == NULL) { errno = EOPNOTSUPP; return NULL; }
+  return fn(context, qp_attr, mlx5_qp_attr);
+#endif
 }

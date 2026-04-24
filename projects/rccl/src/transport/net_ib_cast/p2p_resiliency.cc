@@ -6,7 +6,7 @@
  *************************************************************************/
 
 #include "p2p_resiliency.h"
-#include "p2p.h" // For replay (ncclIbMultiSend() and ncclIbPostFifo())
+#include "net_ib_cast_p2p.h" // For replay (ncclIbMultiSend() and ncclIbPostFifo())
 #include "connect.h" // For ncclIbQpCreate()
 #include "p2p_resiliency_recovery.h"
 

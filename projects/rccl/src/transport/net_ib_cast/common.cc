@@ -5,7 +5,8 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#include "common.h"
+#include "net_ib_cast_common.h"
+#include "connect.h"
 #include "p2p_resiliency.h"
 
 char ncclIbIfName[MAX_IF_NAME_SIZE+1];
@@ -119,7 +120,7 @@ ncclResult_t ncclIbSendCommInit(struct ncclIbSendComm* sendComm) {
 }
 
 pthread_t IbCastAsyncThread;
-static void* IbCastAsyncThreadMain(void* args) {
+void* IbCastAsyncThreadMain(void* args) {
   struct ncclIbDev* dev = (struct ncclIbDev*)args;
   while (1) {
     struct ibv_async_event event;

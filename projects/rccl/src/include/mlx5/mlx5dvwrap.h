@@ -37,5 +37,9 @@ ncclResult_t wrap_mlx5dv_get_data_direct_sysfs_path(struct ibv_context *context,
 /* DMA-BUF support */
 ncclResult_t wrap_mlx5dv_reg_dmabuf_mr(struct ibv_mr **ret, struct ibv_pd *pd, uint64_t offset, size_t length, uint64_t iova, int fd, int access, int mlx5_access);
 struct ibv_mr * wrap_direct_mlx5dv_reg_dmabuf_mr(struct ibv_pd *pd, uint64_t offset, size_t length, uint64_t iova, int fd, int access, int mlx5_access);
+/* OOO QP creation — used by net_ib_cast AINIC path */
+struct ibv_qp * wrap_mlx5dv_create_qp(struct ibv_context *context, struct ibv_qp_init_attr_ex *qp_attr, struct mlx5dv_qp_init_attr *mlx5_qp_attr);
+/* OOO RQ capability query — used by IbCastGetOooRqSize() */
+ncclResult_t wrap_mlx5dv_query_device(struct ibv_context *context, struct mlx5dv_context *attrs_out);
 
 #endif // NCCL_MLX5DVWRAP_H_

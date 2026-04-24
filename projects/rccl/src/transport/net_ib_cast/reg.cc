@@ -5,7 +5,7 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#include "common.h"
+#include "net_ib_cast_common.h"
 
 ncclResult_t IbCastRegMrDmaBufInternal(ncclIbNetCommDevBase* base, void* data, size_t size, int type, uint64_t offset, int fd, ibv_mr** mhandle) {
   static thread_local uintptr_t pageSize = 0;

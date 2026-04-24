@@ -5,10 +5,13 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#include "p2p.h"
-#include "common.h"
+#include "net_ib_cast_p2p.h"
+#include "net_ib_cast_common.h"
 #include "compiler.h"
 #include "p2p_resiliency.h"
+
+extern int64_t ncclParamIbCastArThreshold();
+extern int64_t rcclParamIbCastGdrFlushGpuMemNoRelaxedOrdering();
 
 // By default, use ncclIbRequestMatchingScheme::BY_INDEX matching scheme.
 NCCL_PARAM(IbReceiverSideMatchingScheme, "IB_RECEIVER_SIDE_MATCHING_SCHEME", -2);
@@ -313,7 +316,7 @@ exit:
   return nqps;
 }
 
-static ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, int qpIndex, bool wrrSched, bool use_write_op) {
+ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, int qpIndex, bool wrrSched, bool use_write_op) {
   struct ncclIbRequest** reqs = comm->sendReqs[slot];
   volatile struct ncclIbSendFifo* slots = comm->ctsFifo[slot];
   int nreqs = slots[0].nreqs;
@@ -853,6 +856,42 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, int n, void** data, siz
 
   TRACE(NCCL_NET, "NET/IB: %s: CTS posted (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, wr_id=%ld, opcode=%d, send_flags=%d, qp_num=%u)", __func__, req, req->base, req->id, slot, req->nreqs, wr.wr_id, wr.opcode, wr.send_flags, ctsQp->qp->qp_num);
 
+  return ncclSuccess;
+}
+
+/* ncclIbPostFifo: 3-arg replay wrapper for resiliency. The CTS FIFO element at 'slot' is already
+ * populated from the original post; we re-drive the RDMA write using the stored element. */
+ncclResult_t ncclIbPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* req, int slot) {
+  ncclIbQp* ctsQp;
+  if (rcclAinicRoce) {
+    ctsQp = comm->base.qps + comm->base.qpIndex;
+  } else {
+    ctsQp = comm->base.qps + comm->base.devIndex;
+  }
+
+  struct ibv_send_wr wr;
+  memset(&wr, 0, sizeof(wr));
+  wr.wr.rdma.remote_addr = comm->remFifo.addr + slot * NCCL_NET_IB_MAX_RECVS * sizeof(struct ncclIbSendFifo);
+  wr.wr.rdma.rkey = comm->base.remDevs[ctsQp->remDevIdx].rkey;
+
+  uint64_t localElemRef;
+  if (rcclCtsInlineData) {
+    localElemRef = (uint64_t)comm->remFifo.elems_cts_inline[slot];
+    comm->devs[ctsQp->devIndex].fifoSge.length = MAX_INLINE_DATA_SIZE;
+  } else {
+    localElemRef = (uint64_t)comm->remFifo.elems[slot];
+    comm->devs[ctsQp->devIndex].fifoSge.length = req->nreqs * sizeof(struct ncclIbSendFifo);
+  }
+  comm->devs[ctsQp->devIndex].fifoSge.addr = localElemRef;
+  wr.sg_list = &comm->devs[ctsQp->devIndex].fifoSge;
+  wr.num_sge = 1;
+  wr.opcode = IBV_WR_RDMA_WRITE;
+  wr.send_flags = comm->remFifo.flags | IBV_SEND_SIGNALED;
+  wr.wr_id = slot;
+  IbCastAddEvent(req, ctsQp->devIndex, &comm->devs[ctsQp->devIndex].base, true);
+
+  struct ibv_send_wr* bad_wr;
+  NCCLCHECK(wrap_ibv_post_send(ctsQp->qp, &wr, &bad_wr));
   return ncclSuccess;
 }
 

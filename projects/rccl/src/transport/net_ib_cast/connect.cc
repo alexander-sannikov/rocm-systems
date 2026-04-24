@@ -6,7 +6,7 @@
  *************************************************************************/
 
 #include "connect.h"
-#include "common.h"
+#include "net_ib_cast_common.h"
 #include "p2p_resiliency.h"
 
 extern int64_t ncclParamIbCastGidIndex();
@@ -22,6 +22,7 @@ extern int64_t ncclParamIbCastFifoTc();
 extern int64_t ncclParamIbCastEceEnable();
 extern int64_t ncclParamIbCastQpsPerConn();
 extern int64_t rcclParamIbCastQpsPerP2p();
+extern int64_t rcclParamIbCastGdrFlushGpuMemNoRelaxedOrdering();
 
 extern int64_t ncclParamIbOooRq();
 
@@ -29,32 +30,7 @@ struct ncclIbDevExtraProps {
   bool oooRq;
 };
 
-enum ncclIbCommState {
-  ncclIbCommStateStart = 0,
-  ncclIbCommStateConnect = 1,
-  ncclIbCommStateAccept = 3,
-  ncclIbCommStateSend = 4,
-  ncclIbCommStateRecv = 5,
-  ncclIbCommStateConnecting = 6,
-  ncclIbCommStateConnected = 7,
-  ncclIbCommStatePendingReady = 8,
-  ncclIbCommStateSendDevList = 9,
-  ncclIbCommStateRecvDevList = 10,
-};
-
-struct ncclIbCommStage {
-  enum ncclIbCommState state;
-  int offset;
-  void* buffer;
-  void* comm;
-};
-
-struct ncclIbHandle {
-  union ncclSocketAddress connectAddr; // Filled by the target
-  uint64_t magic; // random number to help debugging
-  struct ncclIbCommStage stage; // Used by the other side when connecting
-  int isP2p;
-};
+// ncclIbCommState, ncclIbCommStage, ncclIbHandle defined in connect.h
 
 extern int ncclIbCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const char* funcName);
 
@@ -878,9 +854,9 @@ ib_recv_dev_list:
 
     // Prepare my CTS FIFO
     if (rcclCtsInlineData) {
-      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo_inline, sizeof(struct ncclIbSendFifoCtsInline)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo_inline, sizeof(struct ncclIbSendFifoCtsInline)*NET_IB_MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     } else {
-      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->fifo, sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
+      NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->fifoMr, commDev->base.pd, comm->ctsFifo, sizeof(struct ncclIbSendFifo)*NET_IB_MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS, IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     }
     devInfo->rkey = commDev->fifoMr->rkey;
 
@@ -928,7 +904,7 @@ ib_recv_dev_list:
   if (rcclCtsInlineData) {
     meta.addr = (uint64_t)comm->fifo_inline;
   } else {
-    meta.addr = (uint64_t)comm->fifo;
+    meta.addr = (uint64_t)comm->ctsFifo;
   }
   meta.sl = (ncclParamIbCastSl() != -1) ? ncclParamIbCastSl() : (trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? trafficClass : NCCL_IB_SL_DEFAULT;
   meta.tc = (ncclParamIbCastTc() != -1) ? ncclParamIbCastTc() : (trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? trafficClass : NCCL_IB_TC_DEFAULT;
@@ -1406,9 +1382,9 @@ ib_recv:
   }
 
   // Store the remote CTS FIFO info provided by the remote peer
-  rComm->remCtsFifo.addr = remMeta.addr;
+  rComm->remFifo.addr = remMeta.addr;
   for (int i = 0; i < rComm->base.nRemDevs; i++) {
-    rComm->remCtsFifo.rkeys[i] = remMeta.devs[i].rkey;
+    rComm->remFifo.rkeys[i] = remMeta.devs[i].rkey;
   }
 
   for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
@@ -1416,11 +1392,11 @@ ib_recv:
 
     if (rcclCtsInlineData) {
       NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->fifoMr, rCommDev->base.pd, &rComm->remFifo.elems_cts_inline,
-                                    sizeof(struct ncclIbSendFifoCtsInline)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS,
+                                    sizeof(struct ncclIbSendFifoCtsInline)*NET_IB_MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS,
                                     IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     } else {
       NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->fifoMr, rCommDev->base.pd, &rComm->remFifo.elems,
-                                    sizeof(struct ncclIbSendFifo)*MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS,
+                                    sizeof(struct ncclIbSendFifo)*NET_IB_MAX_REQUESTS*NCCL_NET_IB_MAX_RECVS,
                                     IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_READ), ret, fail);
     }
     rCommDev->sge.lkey = rCommDev->fifoMr->lkey;

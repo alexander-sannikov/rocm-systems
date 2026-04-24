@@ -8,7 +8,7 @@
 #ifndef NET_IB_CONNECT_H_
 #define NET_IB_CONNECT_H_
 
-#include "common.h"
+#include "net_ib_cast_common.h"
 #include "ibvwrap.h"
 
 struct ncclIbQpCreateAttr {
@@ -64,6 +64,33 @@ struct ncclIbConnectionMetadata {
   int ndevs;
   int tc;
   int sl;
+  int isP2p;
+};
+
+enum ncclIbCommState {
+  ncclIbCommStateStart = 0,
+  ncclIbCommStateConnect = 1,
+  ncclIbCommStateAccept = 3,
+  ncclIbCommStateSend = 4,
+  ncclIbCommStateRecv = 5,
+  ncclIbCommStateConnecting = 6,
+  ncclIbCommStateConnected = 7,
+  ncclIbCommStatePendingReady = 8,
+  ncclIbCommStateSendDevList = 9,
+  ncclIbCommStateRecvDevList = 10,
+};
+
+struct ncclIbCommStage {
+  enum ncclIbCommState state;
+  int offset;
+  void* buffer;
+  void* comm;
+};
+
+struct ncclIbHandle {
+  union ncclSocketAddress connectAddr;
+  uint64_t magic;
+  struct ncclIbCommStage stage;
   int isP2p;
 };
 
