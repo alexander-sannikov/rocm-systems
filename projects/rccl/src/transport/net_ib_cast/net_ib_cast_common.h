@@ -823,6 +823,18 @@ static inline const char* ibvWcOpcodeStr(enum ibv_wc_opcode opcode) {
     default:                return "UNKNOWN";
   }
 }
+static inline const char* ibvWrOpcodeStr(enum ibv_wr_opcode opcode) {
+  switch (opcode) {
+    case IBV_WR_RDMA_WRITE:           return "RDMA_WRITE";
+    case IBV_WR_RDMA_WRITE_WITH_IMM:  return "RDMA_WRITE_WITH_IMM";
+    case IBV_WR_SEND:                 return "SEND";
+    case IBV_WR_SEND_WITH_IMM:        return "SEND_WITH_IMM";
+    case IBV_WR_RDMA_READ:            return "RDMA_READ";
+    case IBV_WR_ATOMIC_CMP_AND_SWP:   return "ATOMIC_CMP_AND_SWP";
+    case IBV_WR_ATOMIC_FETCH_AND_ADD: return "ATOMIC_FETCH_AND_ADD";
+    default:                          return "UNKNOWN";
+  }
+}
 
 #endif
 

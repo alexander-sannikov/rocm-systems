@@ -533,7 +533,7 @@ ncclResult_t IbCastFinalizeDevices(void) {
   return ncclSuccess;
 }
 
-extern int64_t IbCastArThreshold;
+int64_t IbCastArThreshold = 8192;
 ncclResult_t IbCastInitDevices(ncclDebugLogger_t logFunction, ncclProfilerCallback_t profFunction) {
   ncclResult_t ret = ncclSuccess;
   if (netRefCount++) return ret;

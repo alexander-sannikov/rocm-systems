@@ -32,7 +32,16 @@ struct IbCastDevExtraProps {
 
 // IbCastCommState, IbCastCommStage, IbCastHandle defined in connect.h
 
-extern int IbCastCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const char* funcName);
+int IbCastCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const char* funcName) {
+  auto qp_multiplier = (rcclParamIbCastQpsPerP2p() > 0 && isP2p) ?
+                       rcclParamIbCastQpsPerP2p() : ncclParamIbCastQpsPerConn();
+  int localNqps = qp_multiplier * localNdevs;
+  int remoteNqps = qp_multiplier * remoteNdevs;
+  int maxNqps = (remoteNqps > localNqps) ? remoteNqps : localNqps;
+  INFO(NCCL_NET, "NET/IB-CAST: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d",
+       funcName, maxNqps, localNqps, remoteNqps);
+  return maxNqps;
+}
 
 ncclResult_t IbCastInitCommDevBase(int ibDevN, struct IbCastNetCommDevBase* base, void* cq_context) {
   base->ibDevN = ibDevN;

@@ -10,6 +10,7 @@ set(NET_IB_CAST_SOURCES
     src/transport/net_ib_cast/reg.cc
     src/transport/net_ib_cast/gin.cc
     # gin_host_gdaki.cc excluded: requires DOCA SDK + CUDA, not available in ROCm-only builds
+    src/transport/net_ib_cast/deps/gdaki/gin_host_gdaki_stub.cc
 )
 
 add_subdirectory(gdaki)
