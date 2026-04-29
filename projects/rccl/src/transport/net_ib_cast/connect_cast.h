@@ -19,9 +19,11 @@ struct ncclIbQpCreateAttr {
   struct ibv_pd* pd;
   uint32_t maxRecvWorkRequest;
   uint32_t maxSendWorkRequest;
-  bool is_data_qp;
-  bool is_cts_enabled;
+  bool isDataQp;
+  bool isCtsEnabled;
   int8_t ctsQpSlot;
+  int channelId;
+  int ibDevN;
 };
 
 // Per-QP connection metatdata

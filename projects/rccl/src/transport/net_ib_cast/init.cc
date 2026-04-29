@@ -248,11 +248,11 @@ ncclResult_t IbCastMakeVDeviceInternal(int* d, ncclNetVDeviceProps_t* props) {
   IbCastGetPciRootFromPath(dev0->pciPath, root0, sizeof(root0));
   for (int i = 1; i < props->ndevs; i++) {
     ncclIbDev* dev = IbCastDevs + props->devs[i];
-    int numa_i = IbCastGetNumaNodeFromPath(dev->pciPath);
-    if (numa0 >= 0 && numa_i >= 0 && numa_i != numa0) {
+    int numaI = IbCastGetNumaNodeFromPath(dev->pciPath);
+    if (numa0 >= 0 && numaI >= 0 && numaI != numa0) {
       WARN("NET/IB : Merging NICs across NUMA nodes (%s numa=%d, %s numa=%d). "
            "This may significantly reduce performance.",
-           dev0->devName, numa0, dev->devName, numa_i);
+           dev0->devName, numa0, dev->devName, numaI);
       break;
     }
 
@@ -640,9 +640,9 @@ static ncclResult_t IbCastGetPciRootFromPath(
     const char* p = strstr(pciPath, "pci");
     while (p != NULL) {
         int domain, bus;
-        int chars_read = 0;
-        if (sscanf(p, "pci%4x:%2x%n", &domain, &bus, &chars_read) == 2 &&
-            chars_read == 10) {
+        int charsRead = 0;
+        if (sscanf(p, "pci%4x:%2x%n", &domain, &bus, &charsRead) == 2 &&
+            charsRead == 10) {
             snprintf(root, rootLen, "%04x:%02x", domain, bus);
             return ncclSuccess;
         }

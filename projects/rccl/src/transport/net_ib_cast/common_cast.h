@@ -605,7 +605,7 @@ struct ncclIbGpuFlush {
   int* gpuFlushGpuMem;
   struct ibv_sge sge;
   struct ncclIbQp qp;
-  int dmabuf_fd;
+  int dmabufFd;
 };
 
 // This structure describes the FIFO which the receiver uses when it sends CTS
