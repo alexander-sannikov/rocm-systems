@@ -16,6 +16,7 @@ NCCL_PARAM(IbCastTimeout, "IB_TIMEOUT", 20);
 NCCL_PARAM(IbCastRetryCnt, "IB_RETRY_CNT", 7);
 NCCL_PARAM(IbCastPkey, "IB_PKEY", 0);
 NCCL_PARAM(IbCastUseInline, "IB_USE_INLINE", 0);
+NCCL_PARAM(IbCastGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
 NCCL_PARAM(IbCastSl, "IB_SL", -1);
 NCCL_PARAM(IbCastTc, "IB_TC", -1);
 NCCL_PARAM(IbCastFifoTc, "IB_FIFO_TC", -1);
@@ -55,6 +56,41 @@ struct ncclIbHandle {
 };
 
 NCCL_PARAM(IbCastQpsPerConn, "IB_QPS_PER_CONNECTION", 1);
+extern int64_t rcclParamIbCastQpsPerP2p();
+extern int64_t rcclParamIbCastGdrFlushGpuMemNoRelaxedOrdering();
+
+// Calculate number of QPs based on P2P flag and device counts
+static int IbCastCalculateNqps(int isP2p, int localNdevs, int remoteNdevs, const char* funcName) {
+  auto qp_multiplier = (rcclParamIbCastQpsPerP2p() > 0 && isP2p) ? 
+                       rcclParamIbCastQpsPerP2p() : ncclParamIbCastQpsPerConn();
+  int localNqps = qp_multiplier * localNdevs;
+  int remoteNqps = qp_multiplier * remoteNdevs;
+  int maxNqps = (remoteNqps > localNqps) ? remoteNqps : localNqps;
+  INFO(NCCL_NET, "NET/IB: %s Max Nqps=%d, localNqps=%d, remoteNqps=%d", 
+       funcName, maxNqps, localNqps, remoteNqps);
+  return maxNqps;
+}
+
+
+#define NCCL_CTS_QP_SLOT_INVALID 0xFF
+enum ncclIbChannelType {
+  ncclIbChannelTypeCts  = 0,
+  ncclIbChannelTypeData = 1,
+  ncclIbChannelTypeMax  = 2
+};
+
+struct ncclChannelToUd {
+    int channelId;
+    bool udId;
+    bool udAllocated;
+};
+
+static ncclChannelToUd nccl_channel_ud_map[MAX_IB_DEVS][MAXCHANNELS][ncclIbChannelTypeMax];
+static bool nccl_channel_last_ud[MAX_IB_DEVS][ncclIbChannelTypeMax];
+
+static inline bool IbCastIsCtsOffloadEnabled(int isP2p) {
+  return IbCastOffloadEnabled && !(isP2p && rcclParamIbCastP2pDisableCts());
+}
 
 ncclResult_t IbCastInitCommDevBase(int ibDevN, struct ncclIbNetCommDevBase* base, void* cq_context, int cqSize) {
   base->ibDevN = ibDevN;
@@ -346,7 +382,7 @@ static ncclResult_t ncclIbCreateQpMlx5(struct ncclIbQpCreateAttr* createQpAttrs,
   qpInitAttr.cap.max_send_wr = createQpAttrs->maxSendWorkRequest;
   qpInitAttr.cap.max_send_sge = 1;
   qpInitAttr.cap.max_recv_sge = 1;
-  qpInitAttr.cap.max_inline_data = ncclParamIbCastUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
+  qpInitAttr.cap.max_inline_data = IbCastUseInline ? sizeof(struct ncclIbSendFifo)*NCCL_NET_IB_MAX_RECVS : 0;
 
   qpInitAttr.comp_mask = IBV_QP_INIT_ATTR_PD;
   qpInitAttr.pd = createQpAttrs->pd;
@@ -360,10 +396,47 @@ static ncclResult_t ncclIbCreateQpMlx5(struct ncclIbQpCreateAttr* createQpAttrs,
   return ncclSuccess;
 }
 
+static ncclResult_t ncclIbCreateQpIonic(struct ncclIbQpCreateAttr* createQpAttrs, struct ncclIbQp* qp) {
+  struct ibv_qp_init_attr qpInitAttr;
+  memset(&qpInitAttr, 0, sizeof(struct ibv_qp_init_attr));
+  qpInitAttr.qp_context = createQpAttrs->qpContext;
+  qpInitAttr.send_cq = createQpAttrs->cq;
+  qpInitAttr.recv_cq = createQpAttrs->cq;
+  qpInitAttr.qp_type = createQpAttrs->type;
+  qpInitAttr.cap.max_recv_wr = createQpAttrs->maxRecvWorkRequest;
+  qpInitAttr.cap.max_send_wr = createQpAttrs->maxSendWorkRequest;
+  qpInitAttr.cap.max_send_sge = 1;
+  qpInitAttr.cap.max_recv_sge = 1;
+  qpInitAttr.cap.max_inline_data = IbCastUseInline ? sizeof(struct ncclIbSendFifo)*NCCL_NET_IB_MAX_RECVS : 0;
+  if (createQpAttrs->is_cts_enabled) {
+    qpInitAttr.cap.max_inline_data = MAX_INLINE_DATA_SIZE;
+  }
+  qpInitAttr.sq_sig_all |= (1 << 16);
+  if (createQpAttrs->is_data_qp) {
+    qpInitAttr.sq_sig_all |= (1 << 17);
+  } else {
+    qpInitAttr.sq_sig_all &= (~(1 << 17));
+  }
+  qpInitAttr.sq_sig_all |= (1 << 18);
+  if (createQpAttrs->is_cts_enabled) {
+    qpInitAttr.sq_sig_all |= (1 << 19);
+  } else {
+    qpInitAttr.sq_sig_all &= (~(1 << 19));
+  }
+  NCCLCHECK(wrap_ibv_create_qp(&qp->qp, createQpAttrs->pd, &qpInitAttr));
+  NCCLCHECK(wrap_ionicdv_qp_set_gda(qp->qp, false, true));
+  qp->ctsQpSlot = createQpAttrs->ctsQpSlot;
+  return ncclSuccess;
+}
+
 ncclResult_t IbCastQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* createQpAttrs) {
   if (createQpAttrs->oooRq) {
      NCCLCHECK(ncclIbCreateQpMlx5(createQpAttrs, qp));
      return ncclSuccess;
+  }
+  if (IbCastAinicRoce) {
+    NCCLCHECK(ncclIbCreateQpIonic(createQpAttrs, qp));
+    return ncclSuccess;
   }
   struct ibv_qp_init_attr qpInitAttr;
   memset(&qpInitAttr, 0, sizeof(struct ibv_qp_init_attr));
@@ -375,7 +448,7 @@ ncclResult_t IbCastQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* crea
   qpInitAttr.cap.max_send_wr = createQpAttrs->maxSendWorkRequest;
   qpInitAttr.cap.max_send_sge = 1;
   qpInitAttr.cap.max_recv_sge = 1;
-  qpInitAttr.cap.max_inline_data = ncclParamIbCastUseInline() ? sizeof(struct ncclIbSendFifo) : 0;
+  qpInitAttr.cap.max_inline_data = IbCastUseInline ? sizeof(struct ncclIbSendFifo)*NCCL_NET_IB_MAX_RECVS : 0;
   NCCLCHECK(wrap_ibv_create_qp(&qp->qp, createQpAttrs->pd, &qpInitAttr));
   return ncclSuccess;
 }
@@ -489,6 +562,25 @@ fail:
 #define NCCL_IB_SL_DEFAULT 0
 #define NCCL_IB_TC_DEFAULT 0
 
+static ncclResult_t IbCastSetUMDMA(struct ncclIbNetCommDevBase* base, int channel_id, enum ncclIbChannelType channel_type) {
+  if (!IbCastAinicRoce) {
+    return ncclSuccess;
+  }
+  if (!nccl_channel_ud_map[base->ibDevN][channel_id][channel_type].udAllocated) {
+    bool lud = nccl_channel_last_ud[base->ibDevN][channel_type];
+    nccl_channel_ud_map[base->ibDevN][channel_id][channel_type].udId = lud;
+    nccl_channel_ud_map[base->ibDevN][channel_id][channel_type].udAllocated = true;
+    nccl_channel_last_ud[base->ibDevN][channel_type] =
+        !(nccl_channel_last_ud[base->ibDevN][channel_type]);
+  }
+  if (nccl_channel_ud_map[base->ibDevN][channel_id][channel_type].udId) {
+    wrap_ionicdv_pd_set_udma_mask(base->pd, IONIC_UDMA_MASK_HIGH);
+  } else {
+    wrap_ionicdv_pd_set_udma_mask(base->pd, IONIC_UDMA_MASK_LOW);
+  }
+  return ncclSuccess;
+}
+
 // The function creates and initializes QPs (modifies the QPs to INIT) on the
 // sender side. Afterwards it populates the metadata structure, provided to the
 // function (meta), with the QPs' information. Note that after the QPs'
@@ -496,7 +588,7 @@ fail:
 // is updated accordingly. The meta data structure is then expected to be
 // delivered to the remote side (receiver) as part of the connection
 // establishment process.
-static ncclResult_t IbCastSenderQpsCreate(ncclIbSendComm* comm, struct ncclIbConnectionMetadata* meta) {
+static ncclResult_t IbCastSenderQpsCreate(ncclIbSendComm* comm, struct ncclIbConnectionMetadata* meta, int channel_id) {
   uint nqps = comm->base.nqps;
   struct ncclIbQpCreateAttr qpCreateAttrs;
   memset(&qpCreateAttrs, 0, sizeof(struct ncclIbQpCreateAttr));
@@ -520,6 +612,10 @@ static ncclResult_t IbCastSenderQpsCreate(ncclIbSendComm* comm, struct ncclIbCon
     qpCreateAttrs.pd = commDev->base.pd;
     qpCreateAttrs.qpContext = &comm->base.stats;
 
+    qpCreateAttrs.ctsQpSlot = NCCL_CTS_QP_SLOT_INVALID;
+    qpCreateAttrs.is_cts_enabled = comm->useCtsOffload;
+    qpCreateAttrs.is_data_qp = true;
+
     if (ibDev->ibProvider == IB_PROVIDER_MLX5 && ncclParamIbCastOooRq()) {
       if (ibDev->ar == 0) {
         WARN("NET/IB: %s: OOO RQ is force enabled but AR is not enabled, which is required for OOO RQ (device=%s)", __func__, ibDev->devName);
@@ -533,6 +629,7 @@ static ncclResult_t IbCastSenderQpsCreate(ncclIbSendComm* comm, struct ncclIbCon
       }
     }
 
+    NCCLCHECK(IbCastSetUMDMA(&commDev->base, channel_id, ncclIbChannelTypeData));
     NCCLCHECK(IbCastQpCreate(localQp, &qpCreateAttrs));
     INFO(NCCL_NET, "NET/IB: %s: QP created: port=%d dev=%d devName=%s ndevs=%d nmdevs=%d qp_num=%u pkey=%u pd=%p oooRq=%d",
         __func__,
@@ -646,7 +743,7 @@ void IbCastSetTrafficClass(void* ctx, int trafficClass) {
   if (config) config->trafficClass = trafficClass;
 }
 
-ncclResult_t IbCastConnect(void* ctx, int dev, void* opaqueHandle, void** sendComm, ncclNetDeviceHandle_t** /*sendDevComm*/) {
+ncclResult_t IbCastConnect(void* ctx, int dev, void* opaqueHandle, void** sendComm, ncclNetDeviceHandle_t** sendDevComm) {
   ncclResult_t ret = ncclSuccess;
   struct ncclIbHandle* handle = (struct ncclIbHandle*) opaqueHandle;
   struct ncclIbCommStage* stage = &handle->stage;
@@ -654,7 +751,13 @@ ncclResult_t IbCastConnect(void* ctx, int dev, void* opaqueHandle, void** sendCo
   int ready;
 
   uint8_t link_layer = IBV_LINK_LAYER_UNSPECIFIED;
+  int channel_id = 0;
+  int isP2p = 0; 
   *sendComm = NULL;
+
+  if (IbCastAinicRoce) {
+    channel_id = ((ncclNet_ctxt_t *)sendDevComm)->chId;
+  }
 
   if (stage->state == ncclIbCommStateConnect)      goto ib_connect_check;
   if (stage->state == ncclIbCommStateSendDevList)  goto ib_send_dev_list;
@@ -725,11 +828,12 @@ ib_recv_dev_list:
 
   mergedDev = IbCastMergedDevs + dev;
   comm->base.vProps = mergedDev->vProps;
-  int localNqps, remoteNqps;
-  localNqps  = ncclParamIbCastQpsPerConn() * comm->base.vProps.ndevs; // We must have at least 1 qp per-device
-  remoteNqps = ncclParamIbCastQpsPerConn() * remoteVProps.ndevs;
-  comm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps; // Select max nqps (local or remote)
-
+  // Read isP2p from handle
+  isP2p = handle->isP2p;
+  comm->useCtsOffload = IbCastIsCtsOffloadEnabled(isP2p);
+  INFO(NCCL_NET, "NET/IB: IbCastConnect isP2p=%d", isP2p);
+  comm->base.nqps = IbCastCalculateNqps(isP2p, comm->base.vProps.ndevs, 
+                                         remoteVProps.ndevs, __func__);
   comm->base.nDataQps = std::max(comm->base.vProps.ndevs, remoteVProps.ndevs);
 
   if (comm->base.resiliency) {
@@ -741,7 +845,7 @@ ib_recv_dev_list:
   // Sender's CQ size needs to accomodate the upper bound of number of send
   // requests multiplied by the number of QPs used per request.
   int cqSize;
-  cqSize = NET_IB_MAX_REQUESTS*ncclParamIbCastQpsPerConn();
+  cqSize = 3*NET_IB_MAX_REQUESTS*ncclParamIbCastQpsPerConn();
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     int ibDevN = comm->base.vProps.devs[i];
     if (comm->base.resiliency) {
@@ -756,9 +860,10 @@ ib_recv_dev_list:
 
   memset(&meta, 0, sizeof(meta));
   meta.ndevs = comm->base.vProps.ndevs;
+  meta.isP2p = isP2p;
 
   // Create QPs on the sender side
-  NCCLCHECKGOTO(IbCastSenderQpsCreate(comm, &meta), ret, fail);
+  NCCLCHECKGOTO(IbCastSenderQpsCreate(comm, &meta, channel_id), ret, fail);
 
   for (int i = 0; i < comm->base.vProps.ndevs; i++) {
     ncclIbSendCommDev* commDev = comm->devs + i;
@@ -769,6 +874,7 @@ ib_recv_dev_list:
     devInfo->ib_port       = ibDev->portNum;
     devInfo->mtu           = ibDev->portAttr.active_mtu;
     devInfo->lid           = ibDev->portAttr.lid;
+    devInfo->ibv_dev_index = commDev->base.ibDevN;
 
     // Prepare GIN Put Signal scratchpad (for RDMA Atomic result)
     NCCLCHECKGOTO(wrap_ibv_reg_mr(&commDev->putSignalScratchpadMr, commDev->base.pd, &comm->putSignalScratchpad, sizeof(comm->putSignalScratchpad), IBV_ACCESS_LOCAL_WRITE), ret, fail);
@@ -950,7 +1056,7 @@ ncclResult_t IbCastCheckVProps(ncclNetVDeviceProps_t* vProps1, ncclNetVDevicePro
 // the remote metadata structure, provided to the function (remMeta), with the
 // QPs' information so that data structure could be delivered to the remote
 // side (sender) as part of the connection establishment process.
-static ncclResult_t IbCastReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct ncclIbConnectionMetadata* remMeta, struct ncclIbConnectionMetadata* meta) {
+static ncclResult_t IbCastReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct ncclIbConnectionMetadata* remMeta, struct ncclIbConnectionMetadata* meta, int channel_id) {
   uint nqps = rComm->base.nqps;
   struct ncclIbQpCreateAttr qpCreateAttrs;
   memset(&qpCreateAttrs, 0, sizeof(struct ncclIbQpCreateAttr));
@@ -983,6 +1089,11 @@ static ncclResult_t IbCastReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct n
     qpCreateAttrs.cq = rCommDev->base.cq;
     qpCreateAttrs.pd = rCommDev->base.pd;
     qpCreateAttrs.qpContext = &rComm->base.stats;
+
+    qpCreateAttrs.ctsQpSlot = NCCL_CTS_QP_SLOT_INVALID;
+    qpCreateAttrs.is_cts_enabled = rComm->useCtsOffload;
+    qpCreateAttrs.is_data_qp = false;
+
     if (rComm->base.resiliency) {
       IbCastResiliencyDataRqSizeGet(rComm->base.resiliency, devIndex, &qpCreateAttrs.maxRecvWorkRequest);
     }
@@ -1005,6 +1116,7 @@ static ncclResult_t IbCastReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct n
         return ncclInternalError;
       }
     }
+    NCCLCHECK(IbCastSetUMDMA(&rCommDev->base, channel_id, ncclIbChannelTypeCts));
     NCCLCHECK(IbCastQpCreate(localQp, &qpCreateAttrs));
     INFO(NCCL_NET, "NET/IB: %s: QP created: port=%d dev=%d devName=%s ndevs=%d nmdevs=%d qp_num=%u pkey=%u pd=%p oooRq=%d",
         __func__,
@@ -1086,6 +1198,11 @@ static ncclResult_t IbCastReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct n
       qpCreateAttrs.maxRecvWorkRequest = 0;
       qpCreateAttrs.maxSendWorkRequest = NET_IB_MAX_REQUESTS;
       qpCreateAttrs.qpContext = &rComm->base.stats;
+      qpCreateAttrs.ctsQpSlot = NCCL_CTS_QP_SLOT_INVALID;
+      qpCreateAttrs.is_cts_enabled = rComm->useCtsOffload;
+      qpCreateAttrs.is_data_qp = true;
+
+      NCCLCHECK(IbCastSetUMDMA(&rCommDev->base, channel_id, ncclIbChannelTypeData));
       NCCLCHECK(IbCastQpCreate(&rCommDev->gpuFlush.qp, &qpCreateAttrs));
       INFO(NCCL_NET, "NET/IB: %s: Flush QP created: port=%d dev=%d devName=%s ndevs=%d nmdevs=%d qp_num=%u pkey=%u pd=%p",
           __func__,
@@ -1105,7 +1222,7 @@ static ncclResult_t IbCastReceiverQpsCreateToRts(ncclIbRecvComm* rComm, struct n
       initAttr->state = IBV_QPS_INIT;
       initAttr->pkeyIndex = ncclParamIbCastPkey();
       initAttr->portNum = ibDev->portNum;
-      initAttr->qpAccessFlags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ;
+      initAttr->qpAccessFlags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_WRITE;
       NCCLCHECK(IbCastQpInit(flushQp));
 
       struct ncclIbQpRtrAttr *rtrAttr = &flushQp->rtrAttr;
@@ -1156,9 +1273,7 @@ ncclResult_t IbCastReceiverPrePostReceiveWorkRequests(struct ncclIbRecvComm* rec
   return ncclSuccess;
 }
 
-NCCL_PARAM(IbCastGdrFlushDisable, "GDR_FLUSH_DISABLE", 0);
-
-ncclResult_t IbCastAccept(void* listenComm, void** recvComm, ncclNetDeviceHandle_t** /*recvDevComm*/) {
+ncclResult_t IbCastAccept(void* listenComm, void** recvComm, ncclNetDeviceHandle_t** recvDevComm) {
   ncclResult_t ret = ncclSuccess;
   struct ncclIbListenComm* lComm = (struct ncclIbListenComm*)listenComm;
   struct ncclIbCommStage* stage = lComm->stage;
@@ -1169,7 +1284,13 @@ ncclResult_t IbCastAccept(void* listenComm, void** recvComm, ncclNetDeviceHandle
   struct ncclIbRecvComm* rComm = (struct ncclIbRecvComm*)stage->comm;
   int ready;
   int link_layer = IBV_LINK_LAYER_UNSPECIFIED;
+  int channel_id = 0;
+  bool useDmaBuf = false;
   *recvComm = NULL;
+
+  if (IbCastAinicRoce) {
+    channel_id = ((ncclNet_ctxt_t *) recvDevComm)->chId;
+  }
 
   if (stage->state == ncclIbCommStateAccept)   goto ib_accept_check;
   if (stage->state == ncclIbCommStateRecvDevList) goto ib_recv_dev_list;
@@ -1222,10 +1343,10 @@ ib_recv_dev_list:
   NCCLCHECK(IbCastCheckVProps(&mergedDev->vProps, &remoteVProps));
   rComm->base.vProps = mergedDev->vProps;
   memcpy(stage->buffer, &rComm->base.vProps, sizeof(ncclNetVDeviceProps_t));
-  int localNqps, remoteNqps;
-  localNqps  = ncclParamIbCastQpsPerConn() * rComm->base.vProps.ndevs; // We must have at least 1 qp per-device
-  remoteNqps = ncclParamIbCastQpsPerConn() * remoteVProps.ndevs;
-  rComm->base.nqps = remoteNqps > localNqps ? remoteNqps : localNqps; // Select max nqps (local or remote)
+  rComm->useCtsOffload = IbCastIsCtsOffloadEnabled(remMeta.isP2p);
+  INFO(NCCL_NET, "NET/IB: ncclIbAccept isP2p=%d useCtsOffload=%d (IbP2pDisableCts=%d)", remMeta.isP2p, rComm->useCtsOffload, rcclParamIbCastP2pDisableCts());
+  rComm->base.nqps = IbCastCalculateNqps(remMeta.isP2p, rComm->base.vProps.ndevs, 
+                                         remMeta.ndevs, __func__);
 
   rComm->base.nDataQps = std::max(rComm->base.vProps.ndevs, remoteVProps.ndevs);
 
@@ -1278,7 +1399,7 @@ ib_recv:
   // up to 2 completions (one for the CTS message and one for the completion
   // of a receive request) per QP, in the worst case.
   int cqSize;
-  cqSize = 2*NET_IB_MAX_REQUESTS*ncclParamIbCastQpsPerConn();
+  cqSize = 3*NET_IB_MAX_REQUESTS*ncclParamIbCastQpsPerConn();
   for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
     rCommDev = rComm->devs + i;
     ibDevN = rComm->base.vProps.devs[i];
@@ -1324,10 +1445,11 @@ ib_recv:
 
   // Determine if Flush is enabled for this Comm. Must be done before creating
   // QPs. If Flush is enabled, extra QPs will be created for Flush operations.
-  rComm->flushEnabled = ((IbCastGdrSupport() == ncclSuccess || IbCastDmaBufSupport(lComm->dev) == ncclSuccess)
+  useDmaBuf  = (IbCastDmaBufSupport(lComm->dev) == ncclSuccess && ncclParamDmaBufEnable());
+  rComm->flushEnabled = ((IbCastGdrSupport() == ncclSuccess || useDmaBuf) && (!IbCastOffloadEnabled)
                             && (ncclParamIbCastGdrFlushDisable() == 0)) ? 1 : 0;
 
-  NCCLCHECKGOTO(IbCastReceiverQpsCreateToRts(rComm, &remMeta, &meta), ret, fail);
+  NCCLCHECKGOTO(IbCastReceiverQpsCreateToRts(rComm, &remMeta, &meta, channel_id), ret, fail);
   if (rComm->prepostReceiveWorkRequests) {
     NCCLCHECKGOTO(IbCastReceiverPrePostReceiveWorkRequests(rComm), ret, fail);
   }
@@ -1349,7 +1471,7 @@ ib_recv:
     meta.devs[i].rkey = rCommDev->cmplsRecordsMr->rkey;
 
   }
-  if (ncclParamIbCastUseInline()) rComm->remCtsFifo.flags = IBV_SEND_INLINE;
+  if (IbCastUseInline && (!IbCastAinicRoce || rComm->useCtsOffload)) rComm->remCtsFifo.flags = IBV_SEND_INLINE;
 
   for (int i = 0; i < rComm->base.vProps.ndevs; i++) {
     rCommDev = rComm->devs + i;
@@ -1357,6 +1479,32 @@ ib_recv:
 
     // Allocate Flush dummy buffer for GPU Direct RDMA
     if (rComm->flushEnabled) {
+      if (rcclParamIbCastGdrFlushGpuMemNoRelaxedOrdering()) {
+#if defined(HIP_UNCACHED_MEMORY)
+        NCCLCHECKGOTO(ncclCudaCalloc(&rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int), hipDeviceMallocUncached), ret, fail);
+#else
+        NCCLCHECKGOTO(ncclCudaCalloc(&rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int), hipDeviceMallocFinegrained), ret, fail);
+#endif
+        if (useDmaBuf) {
+          uint64_t export_offset = 0;
+          void *aligned_ptr = NULL;
+          size_t aligned_size = 0;
+          get_aligned_ptr_and_size(rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int) /*devicebuffersize*/, &aligned_ptr, &aligned_size);
+          hsa_status_t export_status = pfn_hsa_amd_portable_export_dmabuf(aligned_ptr, aligned_size, &rCommDev->gpuFlush.dmabuf_fd, &export_offset);
+          if (rCommDev->gpuFlush.dmabuf_fd < 0 || export_status != HSA_STATUS_SUCCESS) {
+            WARN("Failed to export DMA BUF");
+            goto fail;
+          }
+          NCCLCHECKGOTO(wrap_ibv_reg_dmabuf_mr(&rCommDev->gpuFlush.gpuMr, rCommDev->base.pd, export_offset, sizeof(int), (uint64_t)rCommDev->gpuFlush.gpuFlushGpuMem /*iova*/, rCommDev->gpuFlush.dmabuf_fd, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ), ret, fail);
+        } else {
+          rCommDev->gpuFlush.dmabuf_fd = -1;
+          NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->gpuFlush.gpuMr, rCommDev->base.pd, rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int), IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ), ret, fail);
+        }
+      } else {
+        rCommDev->gpuFlush.gpuFlushGpuMem = nullptr;
+        rCommDev->gpuFlush.gpuMr = nullptr;
+        rCommDev->gpuFlush.dmabuf_fd = -1;
+      }
       NCCLCHECKGOTO(wrap_ibv_reg_mr(&rCommDev->gpuFlush.hostMr, rCommDev->base.pd, &rComm->gpuFlushHostMem, sizeof(int), IBV_ACCESS_LOCAL_WRITE), ret, fail);
       rCommDev->gpuFlush.sge.addr = (uint64_t)&rComm->gpuFlushHostMem;
       rCommDev->gpuFlush.sge.length = 1;
@@ -1370,12 +1518,14 @@ ib_recv:
     meta.devs[i].gid.global.subnet_prefix       = rCommDev->base.gidInfo.localGid.global.subnet_prefix;
     meta.devs[i].gid.global.interface_id        = rCommDev->base.gidInfo.localGid.global.interface_id;
     meta.devs[i].mtu                            = ibDev->portAttr.active_mtu;
+    meta.devs[i].ibv_dev_index                  = rCommDev->base.ibDevN;
   }
   meta.addr = (uint64_t)rComm->cmplsRecords;
   meta.sl = remMeta.sl;
   meta.tc = remMeta.tc;
 
   meta.ndevs = rComm->base.vProps.ndevs;
+  meta.isP2p = remMeta.isP2p;
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
 
   stage->state = ncclIbCommStateSend;
@@ -1457,6 +1607,13 @@ ncclResult_t IbCastCloseRecv(void* recvComm) {
     for (int i = 0; i < comm->base.vProps.ndevs; i++) {
       struct ncclIbRecvCommDev* commDev = comm->devs + i;
       if (comm->flushEnabled) {
+        if (commDev->gpuFlush.gpuFlushGpuMem != nullptr) {
+          NCCLCHECK(ncclCudaFree(commDev->gpuFlush.gpuFlushGpuMem));
+          commDev->gpuFlush.gpuFlushGpuMem = nullptr;
+          if (commDev->gpuFlush.gpuMr != nullptr) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.gpuMr));
+          commDev->gpuFlush.gpuMr = nullptr;
+          if(commDev->gpuFlush.dmabuf_fd > 0) { close(commDev->gpuFlush.dmabuf_fd);}
+        }
         if (commDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
       }

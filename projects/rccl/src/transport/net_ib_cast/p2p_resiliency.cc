@@ -217,10 +217,10 @@ static ncclResult_t IbCastResiliencyRepostRequest(struct ncclIbRequest* request)
         }
       }
       INFO(NCCL_NET, "NET/IB: %s: Reposting send request (request=%p, comm=%p, id=%ld, slot=%ld, nreqs=%d)", __func__, request, request->base, request->id, request->id % NET_IB_MAX_REQUESTS, request->nreqs);
-      NCCLCHECK(IbCastMultiSend((struct ncclIbSendComm*)request->base, slot));
+      NCCLCHECK(IbCastMultiSend((struct ncclIbSendComm*)request->base, slot, false));
   } else if (request->type == NCCL_NET_IB_REQ_RECV) {
     INFO(NCCL_NET, "NET/IB: %s: Reposting CTS (request=%p, comm=%p, id=%ld, slot=%ld)", __func__, request, request->base, request->id, request->id % NET_IB_MAX_REQUESTS);
-    NCCLCHECK(IbCastPostFifo((struct ncclIbRecvComm*)request->base, request, slot));
+    NCCLCHECK(IbCastPostFifo((struct ncclIbRecvComm*)request->base, request, slot, request->nreqs));
   } else {
     WARN("NET/IB: %s: Unsupported type of request reposting (type=%d, id=%ld).", __func__, request->type, request->id);
     return ncclInternalError;

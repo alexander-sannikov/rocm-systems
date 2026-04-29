@@ -14,6 +14,7 @@ int64_t IbCastArThreshold = 8192;
 
 // By default, use ncclIbRequestMatchingScheme::BY_INDEX matching scheme.
 NCCL_PARAM(IbCastReceiverSideMatchingScheme, "IB_RECEIVER_SIDE_MATCHING_SCHEME", -2);
+RCCL_PARAM(IbCastGdrFlushGpuMemNoRelaxedOrdering, "GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING", 1);
 
 const char* IbCastReqTypeStr[] = { "Unused", "Send", "Recv", "Flush", "IPut" };
 
@@ -88,11 +89,15 @@ static ncclResult_t IbCastPrintWr(struct ibv_send_wr* wr, char* wrStr) {
 // The alignment for IB writes that is required to make LL and LL128 protocols work
 #define IB_WRITE_CHUNK_ALIGNMENT 128
 
-ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot) {
+ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, bool use_write_op) {
   struct ncclIbRequest** reqs = comm->sendReqs[slot];
   volatile struct ncclIbSendFifo* slots = comm->ctsFifo[slot];
   int nreqs = slots[0].nreqs;
   if (nreqs > NCCL_NET_IB_MAX_RECVS) return ncclInternalError;
+
+  if (comm->useCtsOffload) {
+    nreqs = 1;
+  }
 
   TRACE(NCCL_NET, "NET/IB: %s: Posting a send request (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d)", __func__, reqs[0], reqs[0]->base, reqs[0]->id, slot, nreqs);
 
@@ -106,7 +111,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot) {
     sge->addr=(uintptr_t)reqs[r]->send.data;
     wr->opcode = IBV_WR_RDMA_WRITE;
     wr->send_flags = 0;
-    wr->wr.rdma.remote_addr = slots[r].addr;
+    wr->wr.rdma.remote_addr = comm->useCtsOffload ? 0xdeadbeef : slots[r].addr;
     wr->next = wr + 1;
     wr_id += (uint64_t)(slot & 0xff) << (r*8);
     wr->wr_id = wr_id;
@@ -132,23 +137,26 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot) {
   // - nreqs > 1
   //      Send size is still sent but receiver ignores it since the sizes are
   //      written to directly to remote completion records array
-  uint32_t immData = comm->base.recvMatchingScheme == BY_ID ? (uint32_t)(reqs[0]->id % UINT32_MAX) : reqs[0]->send.size;
-
   struct ibv_send_wr* lastWr = comm->wrs+nreqs-1;
-  if (nreqs > 1 || (!(comm->base.remOooRq && comm->base.localOooRq) && comm->ar && reqs[0]->send.size > IbCastArThreshold)) {
-    // When Adaptive Routing is enabled, send the bulk of the data first as an
-    // RDMA Write.
-    lastWr++;
-    memset(lastWr, 0, sizeof(struct ibv_send_wr));
-    if (nreqs > 1) {
-      // Write remote sizes array
-      lastWr->wr.rdma.remote_addr = comm->remCmplsRecords.addr + slot*sizeof(struct ncclIbRequestCompletionRecord);
-      lastWr->num_sge = 1;
+  if (!use_write_op) {
+    uint32_t immData = comm->base.recvMatchingScheme == BY_ID ? (uint32_t)(reqs[0]->id % UINT32_MAX) : reqs[0]->send.size;
+
+    
+    if (nreqs > 1 || (!(comm->base.remOooRq && comm->base.localOooRq) && comm->ar && reqs[0]->send.size > IbCastArThreshold)) {
+      // When Adaptive Routing is enabled, send the bulk of the data first as an
+      // RDMA Write.
+      lastWr++;
+      memset(lastWr, 0, sizeof(struct ibv_send_wr));
+      if (nreqs > 1) {
+        // Write remote sizes array
+        lastWr->wr.rdma.remote_addr = comm->remCmplsRecords.addr + slot*sizeof(struct ncclIbRequestCompletionRecord);
+        lastWr->num_sge = 1;
+      }
     }
+    lastWr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+    lastWr->imm_data = immData;
   }
   lastWr->wr_id = wr_id;
-  lastWr->opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
-  lastWr->imm_data = htobe32(immData);
   lastWr->next = NULL;
   lastWr->send_flags = IBV_SEND_SIGNALED;
 
@@ -176,7 +184,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot) {
       //IbCastAddEvent(reqs[r], devIndex);
 
       // Select proper rkey (needed even for 0-size send)
-      comm->wrs[r].wr.rdma.rkey = slots[r].rkeys[qp->remDevIdx];
+      comm->wrs[r].wr.rdma.rkey = comm->useCtsOffload ? 0xbade : slots[r].rkeys[qp->remDevIdx];
 
       // Check the data left to send. If the send is too small, it might be
       // that on the current QP there is no data left to be sent.
@@ -254,6 +262,7 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot) {
 
 ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void* mhandle, void* phandle, void** request) {
   struct ncclIbSendComm* comm = (struct ncclIbSendComm*)sendComm;
+  bool use_write_op = (IbCastAinicRoce &&(*request == (void *)NCCL_NET_OPTIONAL_RECV_COMPLETION)) ? true : false;
   if (comm->base.ready == 0) {
     WARN("NET/IB: IbCastIsend() called when comm->base.ready == 0");
     *request = NULL;
@@ -262,22 +271,27 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
   NCCLCHECK(IbCastStatsCheckFatalCount(&comm->base.stats,__func__));
 
   struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandle;
-
   // Wait for the receiver to have posted the corresponding receive
-  int nreqs = 0;
+  int nreqs = 1;
   volatile struct ncclIbSendFifo* slots;
 
   int slot = comm->base.fifoHead % NET_IB_MAX_REQUESTS;
   struct ncclIbRequest** reqs = comm->sendReqs[slot];
-  slots = comm->ctsFifo[slot];
-  uint64_t idx = comm->base.fifoHead+1;
-  if (slots[0].idx != idx) { *request = NULL; return ncclSuccess; }
-  nreqs = slots[0].nreqs;
-  // Wait until all data has arrived
-  for (int r=1; r<nreqs; r++) while(slots[r].idx != idx);
-  std::atomic_thread_fence(std::memory_order_seq_cst); // order the nreqsPtr load against tag/rkey/addr loads below
+  if (!comm->useCtsOffload) {
+    slots = comm->ctsFifo[slot];
+    uint64_t idx = comm->base.fifoHead+1;
+    if (slots[0].idx != idx) { *request = NULL; return ncclSuccess; }
+    nreqs = slots[0].nreqs;
+    // Wait until all data has arrived
+    for (int r=1; r<nreqs; r++) while(slots[r].idx != idx);
+    std::atomic_thread_fence(std::memory_order_seq_cst); // order the nreqsPtr load against tag/rkey/addr loads below
+  }
+
+
   for (int r=0; r<nreqs; r++) {
-    if (reqs[r] != NULL || slots[r].tag != tag) continue;
+    if (!comm->useCtsOffload) {
+      if (reqs[r] != NULL || slots[r].tag != tag) continue;
+    }
 
     if (size > slots[r].size) size = slots[r].size;
     // Sanity checks
@@ -334,7 +348,7 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
     if (comm->sendReqsCnt[slot] < nreqs) return ncclSuccess;
 
     TIME_START(0);
-    NCCLCHECK(IbCastMultiSend(comm, slot));
+    NCCLCHECK(IbCastMultiSend(comm, slot, use_write_op));
 
     comm->base.fifoHead++;
     TIME_STOP(0);
@@ -345,9 +359,10 @@ ncclResult_t IbCastIsend(void* sendComm, void* data, size_t size, int tag, void*
   return ncclSuccess;
 }
 
-ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* req, int slot) {
+ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* req, int slot, int n) {
   ncclIbQp* ctsQp = NULL;;
-  NCCLCHECK(IbCastRecvCommGetQpForCts(comm, req->id, &ctsQp));
+  int rid = req ? req->id : comm->base.fifoHead;
+  NCCLCHECK(IbCastRecvCommGetQpForCts(comm, rid, &ctsQp));
 
   struct ibv_send_wr wr;
   memset(&wr, 0, sizeof(wr));
@@ -361,7 +376,7 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* r
   struct ncclIbSendFifo* localElem = comm->remCtsFifo.elems[slot];
   wr.sg_list = &(comm->devs[ctsQp->devIndex].sge);
   wr.sg_list[0].addr = (uint64_t)localElem;
-  wr.sg_list[0].length = req->nreqs*sizeof(struct ncclIbSendFifo);
+  wr.sg_list[0].length = comm->useCtsOffload ? MAX_INLINE_DATA_SIZE : n*sizeof(struct ncclIbSendFifo);
   wr.num_sge = 1;
 
   wr.opcode = IBV_WR_RDMA_WRITE;
@@ -395,18 +410,19 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* r
     wr.wr_id = slot;
   }
 
-  TRACE(NCCL_NET, "NET/IB: %s: Posting a CTS (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, wr_id=%ld, opcode=%d, send_flags=%d, qp_num=%u)", __func__, req, req->base, req->id, slot, req->nreqs, wr.wr_id, wr.opcode, wr.send_flags, ctsQp->qp->qp_num);
+  TRACE(NCCL_NET, "NET/IB: %s: Posting a CTS (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, wr_id=%ld, opcode=%d, send_flags=%d, qp_num=%u)", __func__, req, req->base, rid, slot, req->nreqs, wr.wr_id, wr.opcode, wr.send_flags, ctsQp->qp->qp_num);
 
   struct ibv_send_wr* bad_wr;
   NCCLCHECK(wrap_ibv_post_send(ctsQp->qp, &wr, &bad_wr));
 
-  TRACE(NCCL_NET, "NET/IB: %s: CTS posted (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, wr_id=%ld, opcode=%d, send_flags=%d, qp_num=%u)", __func__, req, req->base, req->id, slot, req->nreqs, wr.wr_id, wr.opcode, wr.send_flags, ctsQp->qp->qp_num);
+  TRACE(NCCL_NET, "NET/IB: %s: CTS posted (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, wr_id=%ld, opcode=%d, send_flags=%d, qp_num=%u)", __func__, req, req->base, rid, slot, req->nreqs, wr.wr_id, wr.opcode, wr.send_flags, ctsQp->qp->qp_num);
 
   return ncclSuccess;
 }
 
 ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int* tags, void** mhandles, void** phandles, void** request) {
   struct ncclIbRecvComm* comm = (struct ncclIbRecvComm*)recvComm;
+  bool netOptRecvCompletionEnabled = false;
   if (comm->base.ready == 0) {
     WARN("NET/IB: IbCastIrecv() called when comm->base.ready == 0");
     *request = NULL;
@@ -414,82 +430,99 @@ ncclResult_t IbCastIrecv(void* recvComm, int n, void** data, size_t* sizes, int*
   }
   if (n > NCCL_NET_IB_MAX_RECVS) return ncclInternalError;
   NCCLCHECK(IbCastStatsCheckFatalCount(&comm->base.stats,__func__));
+  if (IbCastAinicRoce) {
+    if (*request == (void *)NCCL_NET_OPTIONAL_RECV_COMPLETION) {
+      netOptRecvCompletionEnabled = true;
+    }
+  }
 
-  struct ncclIbRequest* req;
-  NCCLCHECK(IbCastGetRequest(&comm->base, &req));
+  struct ncclIbRequest* req = NULL;
   int slot = comm->base.fifoHead % NET_IB_MAX_REQUESTS;
-  req->id = comm->base.fifoHead;
-  req->type = NCCL_NET_IB_REQ_RECV;
-  req->sock = &comm->base.sock;
-  req->nreqs = n;
-  if (comm->base.resiliency) {
-    // When resiliency is enabled, a recv request can be served by any device.
-    for (int devIndex = 0; devIndex < comm->base.vProps.ndevs; devIndex++) {
-      req->devBases[devIndex] = IbCastGetNetCommDevBase(&comm->base, devIndex);
+  if (!netOptRecvCompletionEnabled) {
+    NCCLCHECK(IbCastGetRequest(&comm->base, &req));
+    req->id = comm->base.fifoHead;
+    req->type = NCCL_NET_IB_REQ_RECV;
+    req->sock = &comm->base.sock;
+    req->nreqs = n;
+    if (comm->base.resiliency) {
+      // When resiliency is enabled, a recv request can be served by any device.
+      for (int devIndex = 0; devIndex < comm->base.vProps.ndevs; devIndex++) {
+        req->devBases[devIndex] = IbCastGetNetCommDevBase(&comm->base, devIndex);
+      }
     }
+    TRACE(NCCL_NET, "NET/IB: %s: Recv request created (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, tag[0]=%x)", __func__, req, req->base, req->id, slot, n, tags[0]);
+
+  #ifdef NCCL_ENABLE_NET_PROFILING
+    for (int r = 0; r < n && phandles; r++) req->pInfo[r].nEventHandles = 0;
+  #endif
+
+    // Store the request in a table for easy retrieval by ID.
+    comm->recvReqs[req->id % NET_IB_MAX_REQUESTS] = req;
+
+    TIME_START(1);
+    const int nqps = IbCastCommBaseGetNqpsPerRequest(&comm->base);
+    int qpIndex = -1;
+    ncclIbQp* qp = NULL;
+    for (int i = 0; i < nqps; i++) {
+      NCCLCHECK(IbCastCommBaseGetQpForRequest(&comm->base, req->id, i, &qp, &qpIndex));
+      IbCastAddEvent(req, qp->devIndex);
+      if (comm->prepostReceiveWorkRequests) {
+        continue;
+      }
+      // Post receive work request on the QP
+      comm->ibRecvWorkRequest.wr_id = slot;
+      NCCLCHECK(IbCastPostRecvWorkRequest(qp->qp, &comm->ibRecvWorkRequest));
+  #ifdef NCCL_ENABLE_NET_PROFILING
+      // Start a QP event for every request in the multirecv and every qp
+      for (int r = 0; r < n; r++) {
+        int nEventHandles = req->pInfo[r].nEventHandles;
+        assert(nEventHandles < MAX_QPS_PER_REQ);
+        req->pInfo[r].qpIndex[nEventHandles] = qpIndex;
+        // Store info for profiler
+        int64_t pluginId = NCCL_PROFILER_NET_TYPE_IB | NCCL_PROFILER_NET_IB_VER;
+        req->pInfo[r].data.type = ncclProfileQp;
+        req->pInfo[r].data.qp.device = qp->devIndex;
+        req->pInfo[r].data.qp.wr_id = comm->ibRecvWorkRequest.wr_id;
+        req->pInfo[r].data.qp.qpNum = qp->qp->qp_num;
+        NCCLCHECK(IbCastProfilerFunction(&req->pInfo[r].qpEventHandles[nEventHandles], ncclProfilerNetEventStart, phandles[r], pluginId, &req->pInfo[r].data));
+        req->pInfo[r].nEventHandles++;
+      }
+  #endif
+    }
+    TIME_STOP(1);
+
+    req->recv.aggSize = 0;
+    req->recv.cmplsRecords = &comm->cmplsRecords[slot];
+    memset(req->recv.cmplsRecords->sizes, 0, sizeof(int)*n);
+    memset(req->recv.cmplsRecords->completions, 0, sizeof(req->recv.cmplsRecords->completions));
   }
-  TRACE(NCCL_NET, "NET/IB: %s: Recv request created (req=%p, comm=%p, id=%ld, slot=%d, nreqs=%d, tag[0]=%x)", __func__, req, req->base, req->id, slot, n, tags[0]);
 
-#ifdef NCCL_ENABLE_NET_PROFILING
-  for (int r = 0; r < n && phandles; r++) req->pInfo[r].nEventHandles = 0;
-#endif
-
-  // Store the request in a table for easy retrieval by ID.
-  comm->recvReqs[req->id % NET_IB_MAX_REQUESTS] = req;
-
-  TIME_START(1);
-  const int nqps = IbCastCommBaseGetNqpsPerRequest(&comm->base);
-  int qpIndex = -1;
-  ncclIbQp* qp = NULL;
-  for (int i = 0; i < nqps; i++) {
-    NCCLCHECK(IbCastCommBaseGetQpForRequest(&comm->base, req->id, i, &qp, &qpIndex));
-    IbCastAddEvent(req, qp->devIndex);
-    if (comm->prepostReceiveWorkRequests) {
-      continue;
-    }
-    // Post receive work request on the QP
-    comm->ibRecvWorkRequest.wr_id = slot;
-    NCCLCHECK(IbCastPostRecvWorkRequest(qp->qp, &comm->ibRecvWorkRequest));
-#ifdef NCCL_ENABLE_NET_PROFILING
-    // Start a QP event for every request in the multirecv and every qp
-    for (int r = 0; r < n; r++) {
-      int nEventHandles = req->pInfo[r].nEventHandles;
-      assert(nEventHandles < MAX_QPS_PER_REQ);
-      req->pInfo[r].qpIndex[nEventHandles] = qpIndex;
-      // Store info for profiler
-      int64_t pluginId = NCCL_PROFILER_NET_TYPE_IB | NCCL_PROFILER_NET_IB_VER;
-      req->pInfo[r].data.type = ncclProfileQp;
-      req->pInfo[r].data.qp.device = qp->devIndex;
-      req->pInfo[r].data.qp.wr_id = comm->ibRecvWorkRequest.wr_id;
-      req->pInfo[r].data.qp.qpNum = qp->qp->qp_num;
-      NCCLCHECK(IbCastProfilerFunction(&req->pInfo[r].qpEventHandles[nEventHandles], ncclProfilerNetEventStart, phandles[r], pluginId, &req->pInfo[r].data));
-      req->pInfo[r].nEventHandles++;
-    }
-#endif
-  }
-  TIME_STOP(1);
-
-  req->recv.aggSize = 0;
-  req->recv.cmplsRecords = &comm->cmplsRecords[slot];
-  memset(req->recv.cmplsRecords->sizes, 0, sizeof(int)*n);
-  memset(req->recv.cmplsRecords->completions, 0, sizeof(req->recv.cmplsRecords->completions));
   struct ncclIbSendFifo* localElem = comm->remCtsFifo.elems[slot];
   for (int i=0; i<n; i++) {
-    localElem[i].addr = (uint64_t)data[i];
     struct ncclIbMrHandle* mhandleWrapper = (struct ncclIbMrHandle*) mhandles[i];
-    // Send all applicable rkeys
-    for (int j = 0; j < comm->base.vProps.ndevs; j++) {
-      localElem[i].rkeys[j] = mhandleWrapper->mrs[j]->rkey;
+    if (comm->useCtsOffload) {
+      struct ncclIbSendFifoCtsInline* localElemCtsInline = (struct ncclIbSendFifoCtsInline*)&localElem[i];
+      localElemCtsInline[i].addr = (uint64_t)data[i];
+      localElemCtsInline[i].rkeys[0] = mhandleWrapper->mrs[0]->rkey;
+      localElemCtsInline[i].nreqs = n;
+      localElemCtsInline[i].size = sizes[i]; // Sanity/Debugging
+      localElemCtsInline[i].tag = tags[i];
+    } else {
+      localElem[i].addr = (uint64_t)data[i];
+      // Send all applicable rkeys
+      for (int j = 0; j < comm->base.vProps.ndevs; j++) {
+        localElem[i].rkeys[j] = mhandleWrapper->mrs[j]->rkey;
+      }
+      localElem[i].nreqs = n;
+      localElem[i].size = sizes[i]; // Sanity/Debugging
+      localElem[i].tag = tags[i];
+      localElem[i].idx = comm->base.fifoHead+1;
     }
-    localElem[i].nreqs = n;
-    localElem[i].size = sizes[i]; // Sanity/Debugging
-    localElem[i].tag = tags[i];
-    localElem[i].idx = comm->base.fifoHead+1;
   }
 
   // Post to FIFO to notify sender
   TIME_START(2);
-  NCCLCHECK(IbCastPostFifo(comm, req, slot));
+  NCCLCHECK(IbCastPostFifo(comm, req, slot, n));
   comm->base.fifoHead++;
   TIME_STOP(2);
 
@@ -743,6 +776,8 @@ static inline ncclResult_t IbCastCompletionEventProcess(struct ncclIbNetCommBase
   return ncclSuccess;
 }
 
+#define NCCL_CQ_POLL_MAX_EVENT        16
+
 ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
   struct ncclIbRequest *r = (struct ncclIbRequest*)request;
   *done = 0;
@@ -753,7 +788,11 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
 
   int totalWrDone = 0;
   int wrDone = 0;
-  struct ibv_wc wcs[4];
+  struct ibv_wc wcs[NCCL_CQ_POLL_MAX_EVENT];
+  int cqMaxPollEvent = 4;
+  if (IbCastAinicRoce) {
+    cqMaxPollEvent = NCCL_CQ_POLL_MAX_EVENT;
+  }
   do {
     NCCLCHECK(IbCastStatsCheckFatalCount(&r->base->stats,__func__));
     if (IbCastRequestIsComplete(r)) {
@@ -771,7 +810,7 @@ ncclResult_t IbCastTest(void* request, int* done, int* sizes) {
         continue;
       }
       TIME_START(3);
-      NCCLCHECK(wrap_ibv_poll_cq(r->devBases[i]->cq, 4, wcs, &wrDone));
+      NCCLCHECK(wrap_ibv_poll_cq(r->devBases[i]->cq, cqMaxPollEvent, wcs, &wrDone));
       if (wrDone == 0) { TIME_CANCEL(3); } else { TIME_STOP(3); }
       if (wrDone == 0) continue;
       totalWrDone += wrDone;
