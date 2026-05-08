@@ -11,6 +11,7 @@ set(RCCL_SOURCE_DIR "${PROJECT_SOURCE_DIR}")
 
 # net_ib_cast: populate NET_IB_CAST_SOURCES and NET_IB_CAST_INCLUDE_DIRS
 add_subdirectory(transport/net_ib_cast)
+add_subdirectory(rma)
 
 # Collect list of all source files
 #==================================================================================================
@@ -114,7 +115,10 @@ set(SRC_FILES
   include/nccl_common.h
   include/nccl_device.h
   include/nccl_device/net_device.h
+  include/nccl_merge_stubs.h
   include/net.h
+  include/rma/rma.h
+  include/rma/rma_proxy.h
   include/net_ib_cast_inspect.h
   include/nvmlwrap.h
   include/nvtx.h
@@ -218,6 +222,7 @@ set(SRC_FILES
   include/gin/gin_host.h
   include/gin/gin_host_proxy.h
   include/nccl_device/gin/gin_device_host_common.h
+  include/nccl_device/gin/proxy/gin_proxy_device_host_common.h
   include/plugin/net/net_v6.h
   include/plugin/net/net_v7.h
   include/plugin/net/net_v8.h
@@ -339,6 +344,7 @@ endif()
 list(APPEND SRC_FILES ${SMI_SOURCES})
 # NET_IB_CAST_SOURCES already carry the src/ prefix (set by transport/net_ib_cast/CMakeLists.txt)
 list(APPEND SRC_FILES ${NET_IB_CAST_SOURCES})
+list(APPEND SRC_FILES ${RMA_SOURCES})
 
 # Hipify source files (copy of source generated into hipify directory)
 #==================================================================================================

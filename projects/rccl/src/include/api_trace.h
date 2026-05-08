@@ -166,6 +166,18 @@ typedef ncclResult_t (*ncclCommWindowRegister_fn_t)(ncclComm_t comm, void* userP
 
 typedef ncclResult_t (*ncclCommWindowDeregister_fn_t)(ncclComm_t comm, ncclWindow_t win);
 
+typedef ncclResult_t (*ncclPutSignal_fn_t)(const void* localbuff, size_t count,
+                                           ncclDataType_t datatype, int peer,
+                                           ncclWindow_t peerWin, size_t peerWinOffset,
+                                           int sigIdx, int ctx, unsigned int flags,
+                                           ncclComm_t comm, hipStream_t stream);
+
+typedef ncclResult_t (*ncclSignal_fn_t)(int peer, int sigIdx, int ctx, unsigned int flags,
+                                        ncclComm_t comm, hipStream_t stream);
+
+typedef ncclResult_t (*ncclWaitSignal_fn_t)(int nDesc, ncclWaitSignalDesc_t* signalDescs,
+                                            ncclComm_t comm, hipStream_t stream);
+
 typedef struct rcclApiFuncTable
 {
     // ADD NEW FUNCTIONS AT BOTTOM ONLY
@@ -213,6 +225,9 @@ typedef struct rcclApiFuncTable
     ncclCommWindowDeregister_fn_t ncclCommWindowDeregister_fn;
     ncclAlltoAll_fn_t             ncclAlltoAll_fn;
     ncclAlltoAllv_fn_t            ncclAlltoAllv_fn;
+    ncclPutSignal_fn_t            ncclPutSignal_fn;
+    ncclSignal_fn_t               ncclSignal_fn;
+    ncclWaitSignal_fn_t           ncclWaitSignal_fn;
     // ADD NEW FUNCTIONS HERE ONLY
 } rcclApiFuncTable;
 

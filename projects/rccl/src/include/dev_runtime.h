@@ -12,6 +12,7 @@
 #include "allocator.h"
 #include "bitops.h"
 #include "utils.h"
+#include "nccl_device/gin/gin_device_host_common.h"
 
 ////////////////////////////////////////////////////////////////////////////////
 // ncclDevr[_]: runtime implements for symmetric API.
@@ -89,4 +90,7 @@ ncclResult_t ncclDevrGetLsaRankPtr(struct ncclComm* comm, struct ncclDevrWindow*
 
 // Get the multicast address for a given team
 ncclResult_t ncclDevrGetLsaTeamPtrMC(struct ncclComm* comm, struct ncclDevrWindow* winHost, size_t offset, struct ncclTeam lsaTeam, void** outPtr);
+
+// Get the RMA device window handle for a specific context
+ncclGinWindow_t ncclDevrGetRmaDevWin(struct ncclDevrWindow* winHost, int ctx);
 #endif

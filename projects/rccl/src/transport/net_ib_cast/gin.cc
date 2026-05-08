@@ -11,7 +11,7 @@
 #include "gin_cast.h"
 
 const int IBCAST_GIN_IB_ALLGATHER_TAG = 0xa0;
-const int IBCAST_GIN_IB_ALLTOALL_TAG = 0xa1;
+[[maybe_unused]] const int IBCAST_GIN_IB_ALLTOALL_TAG = 0xa1;
 
 // Check GDR support for GIN. This is run at init, so we don't know yet whether the GPU will support DMA-BUF.
 static ncclResult_t IbCastGinIbGdrSupport(bool* gdrSupport, bool gdaki) {
@@ -119,7 +119,7 @@ try_proxy:
   if (!gdrSupport) return ncclInternalError;
   if (ginIb) memcpy(ginIb, &IbCastGinIbProxy, sizeof(IbCastGinIb));
 
-end:
+end: __attribute__((unused));
   ncclNetCommConfig_t* netCommConfig = nullptr;
   NCCLCHECK(ncclCalloc(&netCommConfig, 1));
   netCommConfig->trafficClass = NCCL_NET_TRAFFIC_CLASS_UNDEF;
