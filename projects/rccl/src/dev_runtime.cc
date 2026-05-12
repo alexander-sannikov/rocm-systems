@@ -20,6 +20,8 @@ struct ncclDevrMemory {
   CUmemGenericAllocationHandle memHandle;
   size_t size;
   size_t bigOffset; // offset in big VA space
+  int maxGlobalNumSegments;    // max(numSegments) across all communicator ranks
+  bool globalHasSysmemSegment; // true if any communicator rank has a sysmem segment
 };
 
 struct ncclDevrWindowSorted {
@@ -873,6 +875,14 @@ ncclResult_t ncclDevrFindWindow(
     *outWin = nullptr;
   }
   return ncclSuccess;
+}
+
+bool ncclDevrWindowIsMultiSegment(struct ncclDevrWindow* win) {
+  return win != NULL && win->memory->maxGlobalNumSegments > 1;
+}
+
+bool ncclDevrWindowHasSysmemSegment(struct ncclDevrWindow* win) {
+  return win != NULL && win->memory->globalHasSysmemSegment;
 }
 
 NCCL_API(ncclResult_t, ncclDevCommCreate, ncclComm_t comm, ncclDevCommRequirements_t const* reqs, ncclDevComm_t* outDevComm);

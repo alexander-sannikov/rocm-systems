@@ -27,6 +27,7 @@
 #include "scheduler.h"
 #include "common.h"
 #include "api_trace.h"
+#include "rma/rma.h"
 #include "rccl_common.h"
 
 #include <cstring> // std::memcpy
@@ -1449,7 +1450,7 @@ namespace {
 }
 
 static ncclResult_t uploadWork(struct ncclComm* comm, struct ncclKernelPlan* plan) {
-  if (plan->isSymColl || plan->isCeColl) return ncclSuccess;
+  if (plan->isSymColl || plan->isCeColl || plan->isRma) return ncclSuccess;
 
   size_t workBytes = plan->workBytes;
   size_t batchBytes = plan->nWorkBatches*sizeof(struct ncclDevWorkBatch);
@@ -1674,6 +1675,10 @@ static ncclResult_t reclaimPlan(struct ncclComm* comm, struct ncclCommCallback* 
     ncclMemoryPoolFree(&comm->memPool_ncclProxyOp, q);
     q = q1;
   }
+  // Free RMA persistent descriptors (graph mode)
+  if (plan->isRma && plan->persistent) {
+    NCCLCHECK(ncclRmaProxyReclaimPlan(comm, plan));
+  }
   // Run other free callbacks
   ncclResult_t result = ncclSuccess;
   while (!ncclIntruQueueEmpty(&plan->cleanupQueue)) {
@@ -1731,7 +1736,8 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
 
   if (planner->nTasksColl + planner->nTasksP2p != 0 ||
       !ncclIntruQueueEmpty(&planner->collSymTaskQueue) ||
-      !ncclIntruQueueEmpty(&planner->collCeTaskQueue)) {
+      !ncclIntruQueueEmpty(&planner->collCeTaskQueue) ||
+      planner->nTasksRma != 0) {
     do {
       memset(&planner->wipPlan, 0, sizeof(planner->wipPlan));
 
@@ -1743,7 +1749,13 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
       plan->workStorageType = persistent ? ncclDevWorkStorageTypePersistent
                                          : ncclDevWorkStorageTypeFifo;
 
-      if (!ncclIntruQueueEmpty(&planner->collCeTaskQueue)) {
+      if (planner->nTasksRma != 0) {
+        NCCLCHECKGOTO(scheduleRmaTasksToPlan(comm, plan), result, failure);
+        if (plan->isRma && plan->rmaArgs != NULL && plan->rmaArgs->nRmaTasks > 0) {
+          ncclIntruQueueEnqueue(&planner->planQueue, plan);
+          nPlans += 1;
+        }
+      } else if (!ncclIntruQueueEmpty(&planner->collCeTaskQueue)) {
         struct ncclTaskColl* task = ncclIntruQueueHead(&planner->collCeTaskQueue);
         plan->isCeColl = true;
         plan->ceCollArgs = ncclMemoryStackAlloc<struct ncclCeCollArgs>(&comm->memScoped);
@@ -1791,7 +1803,8 @@ ncclResult_t ncclLaunchPrepare(struct ncclComm* comm) {
       }
     } while (planner->nTasksColl + planner->nTasksP2p != 0 ||
              !ncclIntruQueueEmpty(&planner->collSymTaskQueue) ||
-             !ncclIntruQueueEmpty(&planner->collCeTaskQueue));
+             !ncclIntruQueueEmpty(&planner->collCeTaskQueue) ||
+             planner->nTasksRma != 0);
 
     struct ncclKernelPlan* planHead = ncclIntruQueueHead(&planner->planQueue);
     planner->unlaunchedPlansHead = planHead;
@@ -3104,11 +3117,198 @@ static ncclResult_t ceCollTaskAppend(
 // Converts `info` to a task and adds it to `comm->planner`. The exception is with
 // single rank communicators, collectives are issued as `ncclMemcpyAsync`s and
 // thus don't need a task.
+static ncclResult_t rmaTaskAppend(
+  struct ncclComm* comm,
+  struct ncclInfo* info) {
+  struct ncclKernelPlanner *planner = &comm->planner;
+
+  void const* srcBuff = info->sendbuff;
+
+  if (!comm->hostRmaSupport) {
+    WARN("One sided RMA: host RMA is not supported in this communicator.");
+    return ncclInvalidArgument;
+  }
+
+  int driverVersion;
+  NCCLCHECK(ncclCudaDriverVersion(&driverVersion));
+  if (driverVersion < 12050) {
+    WARN("One-sided RMA requires CUDA driver 12.5 or later (found %d.%d).",
+      driverVersion / 1000, (driverVersion % 1000) / 10);
+    return ncclInvalidUsage;
+  }
+
+  // Check if context is valid (must be 0 for now)
+  if (info->ctx != 0) {
+    WARN("Context %d is invalid (must be 0)", info->ctx);
+    return ncclInvalidArgument;
+  }
+
+  // Check if signal index is valid (must be 0 for now)
+  if (info->sigIdx != 0) {
+    WARN("Signal index %d is invalid (must be 0)", info->sigIdx);
+    return ncclInvalidArgument;
+  }
+
+  // Check if flags is valid
+  if (info->flags != 0) {
+    WARN("Flags %u is invalid (must be 0)", info->flags);
+    return ncclInvalidArgument;
+  }
+
+  // Initialize window pointers - only needed for Put and Signal
+  struct ncclDevrWindow* peerWinHost = NULL;
+  struct ncclDevrWindow* srcWinHost = NULL;
+  size_t srcWinOffset = 0;
+
+  if (info->coll == ncclFuncPutSignal) {
+    if (info->peerWin == NULL) {
+      WARN("ncclPutSignal: peerWin is NULL");
+      return ncclInvalidArgument;
+    }
+
+    struct ncclWindow_vidmem* peerWinDevHost = NULL;
+    NCCLCHECK(ncclShadowPoolToHost(&comm->devrState.shadows, info->peerWin, &peerWinDevHost));
+    peerWinHost = (struct ncclDevrWindow*)peerWinDevHost->winHost;
+
+    if (srcBuff == NULL) {
+      WARN("ncclPutSignal: srcBuff is NULL");
+      return ncclInvalidArgument;
+    }
+    NCCLCHECK(ncclDevrFindWindow(comm, srcBuff, &srcWinHost));
+    if (srcWinHost == NULL || !(srcWinHost->winFlags & NCCL_WIN_COLL_SYMMETRIC)) {
+      WARN("ncclPutSignal: srcWinHost is not in a valid symmetric window");
+      return ncclInvalidArgument;
+    }
+    srcWinOffset = (char*)srcBuff - (char*)srcWinHost->userPtr;
+
+    bool isMultiSegment = ncclDevrWindowIsMultiSegment(srcWinHost) || ncclDevrWindowIsMultiSegment(peerWinHost);
+    bool hasSysmemSegment = ncclDevrWindowHasSysmemSegment(srcWinHost) || ncclDevrWindowHasSysmemSegment(peerWinHost);
+
+    if (isMultiSegment) {
+      WARN("ncclPutSignal currently does not support VAs backed by multiple physical cuMem segments");
+      return ncclInvalidArgument;
+    }
+    if (hasSysmemSegment) {
+      WARN("ncclPutSignal currently does not support VAs with host-backed cuMem segments");
+      return ncclInvalidArgument;
+    }
+  }
+  else if (info->coll == ncclFuncSignal) {
+    if (info->count != 0) {
+      WARN("ncclSignal: count must be 0");
+      return ncclInvalidArgument;
+    }
+  }
+  else if (info->coll == ncclFuncWaitSignal) {
+    if (info->signalDescs == NULL || info->nDesc == 0) {
+      WARN("ncclWaitSignal: invalid arguments");
+      return ncclInvalidArgument;
+    }
+    for (int i = 0; i < info->nDesc; i++) {
+      if (info->signalDescs[i].opCnt <= 0) {
+        WARN("ncclWaitSignal: descriptor %d has invalid opCnt %d", i, info->signalDescs[i].opCnt);
+        return ncclInvalidArgument;
+      }
+      if (info->signalDescs[i].sigIdx != 0) {
+        WARN("ncclWaitSignal: descriptor %d has invalid sigIdx %d (must be 0)", i, info->signalDescs[i].sigIdx);
+        return ncclInvalidArgument;
+      }
+      if (info->signalDescs[i].ctx != 0) {
+        WARN("ncclWaitSignal: descriptor %d has invalid context %d (must be 0)",
+             i, info->signalDescs[i].ctx);
+        return ncclInvalidArgument;
+      }
+    }
+  }
+
+  // RMA CE initialization check intentionally omitted.
+
+  // Must be in thread local group before tasks can be alloc'd in `comm->memScoped`.
+  ncclGroupCommJoin(info->comm, ncclGroupTaskTypeCollective);
+  NCCLCHECK(ncclPlannerSetCapturingGraph(comm, info));
+
+  // Handle WaitSignal separately
+  if (info->coll == ncclFuncWaitSignal) {
+    struct ncclTaskRma* t = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+
+    t->func = ncclFuncWaitSignal;
+    t->ctx = 0;
+    t->count = 0;
+    t->bytes = 0;
+    t->srcBuff = NULL;
+    t->srcWinOffset = 0;
+    t->srcWinHost = NULL;
+    t->peer = 0;
+    t->peerWinOffset = 0;
+    t->peerWinHost = NULL;
+    t->signalMode = NCCL_SIGNAL;
+
+    t->npeers = info->nDesc;
+    t->peers = ncclMemoryStackAlloc<int>(&comm->memScoped, info->nDesc);
+    t->nsignals = ncclMemoryStackAlloc<int>(&comm->memScoped, info->nDesc);
+
+    for (int i = 0; i < info->nDesc; i++) {
+      t->peers[i] = info->signalDescs[i].peer;
+      t->nsignals[i] = info->signalDescs[i].opCnt;
+    }
+
+    t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
+    planner->nTasksRma++;
+    ncclIntruQueueEnqueue(&planner->rmaTaskQueues[t->ctx], t);
+
+  } else if (info->coll == ncclFuncPutSignal || info->coll == ncclFuncSignal) {
+
+    size_t totalBytes = info->count * ncclTypeSize(info->datatype);
+    const size_t chunkSize = 1ULL << 30; // 1GB
+
+    int numChunks = 1;
+    if (info->coll == ncclFuncPutSignal && totalBytes > chunkSize) {
+      numChunks = (totalBytes + chunkSize - 1) / chunkSize;
+    }
+
+    for (int chunkIdx = 0; chunkIdx < numChunks; chunkIdx++) {
+      struct ncclTaskRma* t = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
+
+      size_t chunkBytes = (chunkIdx == numChunks - 1)
+                          ? (totalBytes - chunkIdx * chunkSize)
+                          : chunkSize;
+      size_t chunkOffset = chunkIdx * chunkSize;
+
+      t->func = info->coll;
+      t->srcBuff = (const char*)srcBuff + chunkOffset;
+      t->srcWinOffset = srcWinOffset + chunkOffset;
+      t->srcWinHost = srcWinHost;
+      t->count = chunkBytes / ncclTypeSize(info->datatype);
+      t->datatype = info->datatype;
+      t->bytes = chunkBytes;
+      t->ctx = info->ctx;
+      t->peer = info->root;
+      t->peerWinOffset = info->peerWinOffset + chunkOffset;
+      t->peerWinHost = peerWinHost;
+
+      bool isLastChunk = (chunkIdx == numChunks - 1);
+      t->signalMode = isLastChunk ? NCCL_SIGNAL : NCCL_SIGNAL_NONE;
+      t->peers = NULL;
+      t->nsignals = NULL;
+      t->npeers = 0;
+
+      t->eActivationMask = __atomic_load_n(&ncclProfilerEventMask, __ATOMIC_RELAXED);
+
+      planner->nTasksRma++;
+      ncclIntruQueueEnqueue(&planner->rmaTaskQueues[t->ctx], t);
+    }
+  }
+
+  return ncclSuccess;
+}
+
 static ncclResult_t taskAppend(struct ncclComm* comm, struct ncclInfo* info) {
   ncclFunc_t collAPI = info->coll;
 
   if (info->coll == ncclFuncSend || info->coll == ncclFuncRecv) {
     NCCLCHECK(p2pTaskAppend(comm, info, info->coll, collAPI, (void*)info->recvbuff, info->count, info->datatype, info->root));
+  } else if (info->coll == ncclFuncPutSignal || info->coll == ncclFuncSignal || info->coll == ncclFuncWaitSignal) {
+    NCCLCHECK(rmaTaskAppend(comm, info));
   } else {
     // Empty collectives can be discarded.
     if (info->count == 0) return ncclSuccess;

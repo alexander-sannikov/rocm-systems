@@ -12,6 +12,7 @@ set(RCCL_SOURCE_DIR "${PROJECT_SOURCE_DIR}")
 # net_ib_cast: populate NET_IB_CAST_SOURCES and NET_IB_CAST_INCLUDE_DIRS
 add_subdirectory(transport/net_ib_cast)
 add_subdirectory(rma)
+add_subdirectory(gin)
 
 # Collect list of all source files
 #==================================================================================================
@@ -219,10 +220,10 @@ set(SRC_FILES
   include/plugin/gin/gin_v11.h
   include/plugin/gin/gin_v12.h
   include/plugin/gin/gin_v13.h
+  include/gin.h
   include/gin/gin_host.h
   include/gin/gin_host_proxy.h
-  include/nccl_device/gin/gin_device_host_common.h
-  include/nccl_device/gin/proxy/gin_proxy_device_host_common.h
+  include/gin/gin_host_win_stub.h
   include/plugin/net/net_v6.h
   include/plugin/net/net_v7.h
   include/plugin/net/net_v8.h
@@ -273,9 +274,13 @@ set(SRC_FILES
   nccl_device/ll_a2a.cc
   nccl_device/mem_barrier.cc
   plugin/net.cc
+  plugin/gin.cc
   plugin/plugin_open.cc
   plugin/profiler.cc
   plugin/tuner.cc
+  plugin/gin/gin_v11.cc
+  plugin/gin/gin_v12.cc
+  plugin/gin/gin_v13.cc
   plugin/net/net_v6.cc
   plugin/net/net_v7.cc
   plugin/net/net_v8.cc
@@ -345,6 +350,7 @@ list(APPEND SRC_FILES ${SMI_SOURCES})
 # NET_IB_CAST_SOURCES already carry the src/ prefix (set by transport/net_ib_cast/CMakeLists.txt)
 list(APPEND SRC_FILES ${NET_IB_CAST_SOURCES})
 list(APPEND SRC_FILES ${RMA_SOURCES})
+list(APPEND SRC_FILES ${GIN_SOURCES})
 
 # Hipify source files (copy of source generated into hipify directory)
 #==================================================================================================

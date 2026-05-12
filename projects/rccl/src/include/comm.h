@@ -798,6 +798,7 @@ struct ncclComm {
 
   // RMA state
   struct ncclRmaState rmaState;
+  bool hostRmaSupport;
 
   // buffer registration cache
   struct ncclRegCache regCache;

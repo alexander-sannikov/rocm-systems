@@ -15,6 +15,7 @@
 #include <assert.h>
 #include "bootstrap.h"
 #include "ce_coll.h"
+#include "rma/rma.h"
 #include "profiler.h"
 #include "nvtx.h"
 
@@ -341,6 +342,8 @@ static ncclResult_t doLaunches(struct ncclComm* head) {
             NCCLCHECKGOTO(ncclLaunchKernelBefore_NoUncapturedCuda(comm, plan), result, failure);
             if (plan->isCeColl) {
               NCCLCHECKGOTO(ncclLaunchCeColl(comm, plan), result, failure);
+            } else if (plan->isRma) {
+              NCCLCHECKGOTO(ncclLaunchRma(comm, plan), result, failure);
             } else {
               NCCLCHECKGOTO(ncclLaunchKernel(comm, plan), result, failure);
             }

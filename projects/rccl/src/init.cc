@@ -16,6 +16,8 @@
 #include "group.h"
 #include "net.h"
 #include "coll_net.h"
+#include "gin.h"
+#include "rma/rma_proxy.h"
 #include "enqueue.h"
 #include "graph.h"
 #include "argcheck.h"
@@ -590,6 +592,9 @@ skip_profiling:
   for (int channel=0; channel<MAXCHANNELS; channel++)
     NCCLCHECK(freeChannel(comm->channels+channel, comm->nRanks, 1, comm->localRanks));
 
+  // RMA proxy must be finalized before destroying the proxy.
+  NCCLCHECK(ncclRmaProxyFinalize(comm));
+
   if (comm->doneEvent != NULL)
     CUDACHECK(hipEventDestroy(comm->doneEvent));
 
@@ -644,6 +649,7 @@ skip_profiling:
   commPoison(comm); // poison comm before free to avoid comm reuse.
   NCCLCHECK(ncclProfilerPluginFinalize(comm));
   NCCLCHECK(ncclNetFinalize(comm));
+  NCCLCHECK(ncclGinFinalize(comm));
   if (ncclParamLaunchOrderImplicit()) {
     ncclCudaContextDrop(comm->context);
     INFO(NCCL_INIT, "cudaDev %d context tracking destroyed", comm->cudaDev);
@@ -733,6 +739,7 @@ static ncclResult_t commAlloc(struct ncclComm* comm, struct ncclComm* parent, in
   comm->forcePatEnable = (parent != nullptr) ? parent->forcePatEnable : false;
 
   NCCLCHECK(ncclNetInit(comm));
+  NCCLCHECK(ncclGinInit(comm));
   INFO(NCCL_INIT, "Using network %s", comm->ncclNet->name);
 
   if (parent && parent->shareResources) {
@@ -849,6 +856,7 @@ static ncclResult_t commAlloc(struct ncclComm* comm, struct ncclComm* parent, in
   } else {
     comm->sharedRes = parent->sharedRes;
     ncclAtomicRefCountIncrement(&parent->sharedRes->refCount);
+    NCCLCHECK(ncclGinInitFromParent(comm, parent));
   }
 
   CUDACHECK(hipDeviceGetAttribute(&comm->WarpSize, hipDeviceAttributeWarpSize, comm->cudaDev));

@@ -73,6 +73,8 @@ ncclResult_t ncclDevrFinalize(struct ncclComm* comm);
 
 // If found *outWinHost will be populated and *outWinId >= 0, otherwise *outWinId == -1
 ncclResult_t ncclDevrFindWindow(struct ncclComm* comm, void const* userPtr, struct ncclDevrWindow** outWin);
+bool ncclDevrWindowIsMultiSegment(struct ncclDevrWindow* win);
+bool ncclDevrWindowHasSysmemSegment(struct ncclDevrWindow* win);
 
 ncclResult_t ncclDevrWindowRegisterInGroup(
   struct ncclComm* comm, void* ptr, size_t size, int winFlags, ncclWindow_t* outWinDev

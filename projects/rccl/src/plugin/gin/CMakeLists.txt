@@ -1,8 +1,8 @@
 # Gin plugin sources
 set(PLUGIN_GIN_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/gin_v11.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/gin_v12.cc
-    ${CMAKE_CURRENT_SOURCE_DIR}/gin_v13.cc
+    src/plugin/gin/gin_v11.cc
+    src/plugin/gin/gin_v12.cc
+    src/plugin/gin/gin_v13.cc
 )
 
 # Add net plugin sources to parent scope

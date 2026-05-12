@@ -5,7 +5,6 @@
  * See LICENSE.txt for more license information
  *************************************************************************/
 
-#define RCCL_RMA_CU_PATH_DISABLED
 #include <assert.h>
 #include "nccl.h"
 #include "alloc.h"
@@ -25,7 +24,6 @@ static bool isLsaAccessible(struct ncclComm* comm, int rank) {
 ncclResult_t ncclRmaWaitSignal(struct ncclComm* comm, struct ncclKernelPlan* plan, cudaStream_t stream){
   ncclResult_t ret = ncclSuccess;
 
-#ifndef RCCL_RMA_CU_PATH_DISABLED
   // If we have both proxy and CE tasks, execute them in parallel
   if (plan->rmaArgs->nRmaTasksProxy > 0 && plan->rmaArgs->nRmaTasksCe > 0) {
     cudaStream_t ceStream = comm->rmaState.rmaCeState.ceStream;
@@ -51,11 +49,6 @@ ncclResult_t ncclRmaWaitSignal(struct ncclComm* comm, struct ncclKernelPlan* pla
   else if (plan->rmaArgs->nRmaTasksCe > 0) {
     NCCLCHECKGOTO(ncclRmaCeWaitLaunch(comm, plan, stream), ret, fail);
   }
-#else
-  if (plan->rmaArgs->nRmaTasksProxy > 0) {
-    NCCLCHECKGOTO(ncclRmaProxyWaitLaunch(comm, plan, stream), ret, fail);
-  }
-#endif
 
 exit:
   return ret;
@@ -67,7 +60,6 @@ fail:
 ncclResult_t ncclRmaPut(struct ncclComm* comm, struct ncclKernelPlan* plan, cudaStream_t stream){
   ncclResult_t ret = ncclSuccess;
 
-#ifndef RCCL_RMA_CU_PATH_DISABLED
   // If we have both proxy and CE tasks, execute them in parallel
   if (plan->rmaArgs->nRmaTasksProxy > 0 && plan->rmaArgs->nRmaTasksCe > 0) {
     cudaStream_t ceStream = comm->rmaState.rmaCeState.ceStream;
@@ -93,11 +85,6 @@ ncclResult_t ncclRmaPut(struct ncclComm* comm, struct ncclKernelPlan* plan, cuda
   else if (plan->rmaArgs->nRmaTasksCe > 0) {
     NCCLCHECKGOTO(ncclRmaCePutLaunch(comm, plan, stream), ret, fail);
   }
-#else
-  if (plan->rmaArgs->nRmaTasksProxy > 0) {
-    NCCLCHECKGOTO(ncclRmaProxyPutLaunch(comm, plan, stream), ret, fail);
-  }
-#endif
 
 exit:
   return ret;
@@ -183,13 +170,10 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
   plan->rmaArgs->func = firstTask->func;
   plan->rmaArgs->nRmaTasks = 0;
   plan->rmaArgs->nRmaTasksProxy = 0;
-#ifndef RCCL_RMA_CU_PATH_DISABLED
   plan->rmaArgs->nRmaTasksCe = 0;
-#endif
 
   // WaitSignal tasks
   if (firstTask->func == ncclFuncWaitSignal) {
-#ifndef RCCL_RMA_CU_PATH_DISABLED
     // Allocate temporary arrays to hold peers and nsignals for both proxy and CE paths
     int* peersCe = ncclMemoryStackAlloc<int>(&comm->memScoped, firstTask->npeers);
     int* nsignalsCe = ncclMemoryStackAlloc<int>(&comm->memScoped, firstTask->npeers);
@@ -252,42 +236,12 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
     }
 
     plan->rmaArgs->nRmaTasks = (npeersCe > 0 ? 1 : 0) + (npeersProxy > 0 ? 1 : 0);
-#else
-    // RCCL_RMA_CU_PATH_DISABLED: all peers go through proxy
-    NCCLCHECKGOTO(ncclCalloc(&peersProxy, firstTask->npeers), ret, fail);
-    NCCLCHECKGOTO(ncclCalloc(&nsignalsProxy, firstTask->npeers), ret, fail);
-    int npeersProxy = 0;
-    for (int i = 0; i < firstTask->npeers; i++) {
-      peersProxy[npeersProxy] = firstTask->peers[i];
-      nsignalsProxy[npeersProxy] = firstTask->nsignals[i];
-      npeersProxy++;
-    }
-    if (npeersProxy > 0) {
-      struct ncclTaskRma* waitSignalTaskProxy = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
-      waitSignalTaskProxy->func = ncclFuncWaitSignal;
-      waitSignalTaskProxy->ctx = firstTask->ctx;
-      waitSignalTaskProxy->signalMode = firstTask->signalMode;
-      waitSignalTaskProxy->peers = peersProxy;
-      waitSignalTaskProxy->nsignals = nsignalsProxy;
-      waitSignalTaskProxy->npeers = npeersProxy;
-      ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, waitSignalTaskProxy);
-      plan->rmaArgs->nRmaTasksProxy = 1;
-    } else {
-      free(peersProxy);
-      peersProxy = nullptr;
-      free(nsignalsProxy);
-      nsignalsProxy = nullptr;
-      plan->rmaArgs->nRmaTasksProxy = 0;
-    }
-    plan->rmaArgs->nRmaTasks = (npeersProxy > 0 ? 1 : 0);
-#endif
     planner->nTasksRma -= 1;
     // Free the original WaitSignal task (split into CE and Proxy tasks)
     ncclMemoryPoolFree(&comm->memPool_ncclTaskRma, firstTask);
   }
   // Put/Signal tasks
   else {
-#ifndef RCCL_RMA_CU_PATH_DISABLED
     // Check if the first task is LSA accessible
     bool lsaAccessible = isLsaAccessible(comm, firstTask->peer);
 
@@ -326,30 +280,10 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
       plan->rmaArgs->nRmaTasks++;
       planner->nTasksRma -= 1;
     }
-#else
-    // RCCL_RMA_CU_PATH_DISABLED: all tasks go through proxy
-    plan->rmaArgs->nRmaTasks = 1;
-    plan->rmaArgs->nRmaTasksProxy = 1;
-    ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, firstTask);
-    planner->nTasksRma -= 1;
-
-    // Batch consecutive tasks from the same context that match operation category
-    while (!ncclIntruQueueEmpty(ctxQueue)) {
-      struct ncclTaskRma* task = ncclIntruQueueHead(ctxQueue);
-      if (!canBatchRmaTasks(firstTask, task)) {
-        break;
-      }
-      ncclIntruQueueDequeue(ctxQueue);
-      ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, task);
-      plan->rmaArgs->nRmaTasksProxy++;
-      plan->rmaArgs->nRmaTasks++;
-      planner->nTasksRma -= 1;
-    }
-#endif
   }
 
-  INFO(NCCL_COLL, "scheduleRmaTasksToPlan: rank=%d ctx=%d func=%d nRmaTasks=%d nRmaTasksProxy=%d",
-    comm->rank, ctx, plan->rmaArgs->func, plan->rmaArgs->nRmaTasks, plan->rmaArgs->nRmaTasksProxy);
+  INFO(NCCL_COLL, "scheduleRmaTasksToPlan: rank=%d ctx=%d func=%d nRmaTasks=%d nRmaTasksProxy=%d nRmaTasksCe=%d",
+    comm->rank, ctx, plan->rmaArgs->func, plan->rmaArgs->nRmaTasks, plan->rmaArgs->nRmaTasksProxy, plan->rmaArgs->nRmaTasksCe);
 
 exit:
   return ret;
