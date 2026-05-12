@@ -117,6 +117,7 @@ set(SRC_FILES
   include/nccl_device.h
   include/nccl_device/net_device.h
   include/nccl_merge_stubs.h
+  include/os.h
   include/net.h
   include/rma/rma.h
   include/rma/rma_proxy.h
@@ -174,6 +175,8 @@ set(SRC_FILES
   include/nccl_device/impl/mem_barrier__types.h
   include/nccl_device/impl/ptr__funcs.h
   include/nccl_device/impl/ptr__types.h
+  include/nccl_device/gin/gin_device_host_common.h
+  include/nccl_device/gin/proxy/gin_proxy_device_host_common.h
   include/npkit/npkit.h
   include/npkit/npkit_event.h
   include/npkit/npkit_struct.h

@@ -15,14 +15,16 @@
 
 #define MAX_STR_LEN 255
 
-#define NUM_LIBS 3
+// RCCL: NUM_LIBS expanded from 3 to 4 to accommodate ncclPluginTypeGin (NCCL 2.30.4)
+// Enum order: ncclPluginTypeNet=0, ncclPluginTypeGin=1, ncclPluginTypeTuner=2, ncclPluginTypeProfiler=3
+#define NUM_LIBS 4
 static char* libNames[NUM_LIBS];
 char* ncclPluginLibPaths[NUM_LIBS];
 static void *libHandles[NUM_LIBS];
-static const char *pluginNames[NUM_LIBS] = { "NET", "TUNER", "PROFILER" };
-static const char *pluginPrefix[NUM_LIBS] = { "librccl-net", "libnccl-tuner", "librccl-profiler" };
-static const char *pluginFallback[NUM_LIBS] = { "", "Using internal tuner plugin.", "" };
-static unsigned long subsys[NUM_LIBS] = { NCCL_INIT|NCCL_NET, NCCL_INIT|NCCL_TUNING, NCCL_INIT };
+static const char *pluginNames[NUM_LIBS] = { "NET", "GIN", "TUNER", "PROFILER" };
+static const char *pluginPrefix[NUM_LIBS] = { "librccl-net", "libnccl-gin", "libnccl-tuner", "librccl-profiler" };
+static const char *pluginFallback[NUM_LIBS] = { "", "", "Using internal tuner plugin.", "" };
+static unsigned long subsys[NUM_LIBS] = { NCCL_INIT|NCCL_NET, NCCL_INIT|NCCL_NET, NCCL_INIT|NCCL_TUNING, NCCL_INIT };
 
 static void* tryOpenLib(char* name, int* err, char* errStr) {
   *err = 0;
@@ -114,6 +116,10 @@ static void* openPluginLib(enum ncclPluginType type, const char* libName) {
 
 void* ncclOpenNetPluginLib(const char* name) {
   return openPluginLib(ncclPluginTypeNet, name);
+}
+
+void* ncclOpenGinPluginLib(const char* name) { // RCCL: added for NCCL 2.30.4 GIN host API
+  return openPluginLib(ncclPluginTypeGin, name);
 }
 
 void* ncclOpenTunerPluginLib(const char* name) {

@@ -477,7 +477,7 @@ static ncclResult_t ncclGinProxyCreateContext(void* collComm, ncclGinConfig_t* c
   if (config->nSignals) {
     size_t signalsBufSize = config->nSignals * nContexts * sizeof(uint64_t);
     NCCLCHECK(ncclCuMemAlloc((void **)&proxyCtx->signalsDev, &proxyCtx->signalsCumemhandle,
-                             CU_MEM_HANDLE_TYPE_NONE, signalsBufSize, NULL));
+                             CU_MEM_HANDLE_TYPE_NONE, signalsBufSize)); // RCCL: dropped extra NULL (no manager param)
     CUDACHECK(cudaMemset(proxyCtx->signalsDev, 0, signalsBufSize));
     NCCLCHECK(ncclGinProxyRegMrSym(collComm, proxyCtx->signalsDev, signalsBufSize,
                                    NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO,
@@ -553,7 +553,7 @@ static ncclResult_t ncclGinProxyDestroyContext(void *ginCtx) {
     // Free signals
     if (ctx->collComm && ctx->signalsMhandle)
       ginBackend->deregMrSym(ctx->collComm, ctx->signalsMhandle);
-    if (ctx->signalsDev) NCCLCHECK(ncclCudaFree(ctx->signalsDev, NULL));
+    if (ctx->signalsDev) NCCLCHECK(ncclCudaFree(ctx->signalsDev)); // RCCL: dropped NULL (ncclCudaFree takes 1 arg)
 
     // Free hostGpuCtx and its allocations
     if (ctx->hostGpuCtx) {
@@ -561,7 +561,7 @@ static ncclResult_t ncclGinProxyDestroyContext(void *ginCtx) {
         struct ginProxyHostGpuCtx *hostGpuCtx = ctx->hostGpuCtx + contextId;
         if (hostGpuCtx->cisShadow) free(hostGpuCtx->cisShadow);
         if (hostGpuCtx->sis) free(hostGpuCtx->sis);
-        if (hostGpuCtx->pis) NCCLCHECK(ncclCudaFree(hostGpuCtx->pis, NULL));
+        if (hostGpuCtx->pis) NCCLCHECK(ncclCudaFree(hostGpuCtx->pis)); // RCCL: dropped NULL (ncclCudaFree takes 1 arg)
         if (hostGpuCtx->states) free(hostGpuCtx->states);
         if (hostGpuCtx->inlines) free(hostGpuCtx->inlines);
         if (ctx->collComm && hostGpuCtx->inlinesMhandle)
@@ -575,7 +575,7 @@ static ncclResult_t ncclGinProxyDestroyContext(void *ginCtx) {
 
     ncclNetDeviceHandle_t *devHandle = (ncclNetDeviceHandle_t *)ctx->devHandle;
     if (devHandle) {
-      if (devHandle->handle) NCCLCHECK(ncclCudaFree((void *)devHandle->handle, NULL));
+      if (devHandle->handle) NCCLCHECK(ncclCudaFree((void *)devHandle->handle)); // RCCL: dropped NULL (ncclCudaFree takes 1 arg)
       free(devHandle);
     }
 

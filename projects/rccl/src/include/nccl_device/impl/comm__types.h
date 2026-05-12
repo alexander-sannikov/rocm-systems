@@ -35,6 +35,17 @@ struct ncclDevComm {
 
   ncclMultimemHandle_t lsaMultimem;
   ncclLsaBarrierHandle_t lsaBarrier;
+
+  // RCCL: GIN host API fields (NCCL 2.30.4)
+#ifndef NCCL_GIN_MAX_CONNECTIONS
+#define NCCL_GIN_MAX_CONNECTIONS 4
+#endif
+  uint8_t ginConnectionCount;
+  uint8_t ginNetDeviceTypes[NCCL_GIN_MAX_CONNECTIONS];
+  void* ginHandles[NCCL_GIN_MAX_CONNECTIONS];
+  int ginSignalCount;
+  int ginCounterCount;
+  uint32_t ginContextCount;
 };
 
 #endif // _NCCL_DEVICE_COMM__TYPES_H_

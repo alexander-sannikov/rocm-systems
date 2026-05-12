@@ -631,7 +631,7 @@ ncclResult_t ncclRmaProxyCreateContext(struct ncclComm*, void*, ncclNetPropertie
   WARN("ncclRmaProxyCreateContext: CU path disabled in RCCL"); return ncclInternalError;
 }
 ncclResult_t ncclRmaProxyDestroyContext(ncclGin_t*, void*) { return ncclSuccess; }
-ncclResult_t ncclRmaProxyRegister(struct ncclComm*, void*, size_t, ncclNetDeviceHandle_t**, void**) {
+ncclResult_t ncclRmaProxyRegister(struct ncclComm*, void*, size_t, void* rmaHostWins[NCCL_GIN_MAX_CONNECTIONS], ncclGinWindow_t rmaDevWins[NCCL_GIN_MAX_CONNECTIONS]) {
   WARN("ncclRmaProxyRegister: CU path disabled in RCCL"); return ncclInternalError;
 }
 ncclResult_t ncclRmaProxyDeregister(struct ncclComm*, void*[NCCL_GIN_MAX_CONNECTIONS]) {

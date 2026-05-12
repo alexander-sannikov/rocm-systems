@@ -82,9 +82,9 @@ static ncclResult_t ncclGin_getProperties(int dev, ncclNetProperties_t* props) {
   props->maxP2pBytes = props_v11.maxP2pBytes;
   props->maxCollBytes = props_v11.maxCollBytes;
   props->maxMultiRequestSize = props_v11.maxMultiRequestSize;
-  // Undefined to be ignore in NCCL core
-  props->railId = NCCL_NET_ID_UNDEF;
-  props->planeId = NCCL_NET_ID_UNDEF;
+  // RCCL: railId/planeId are not in ncclNetProperties_v11_t in this RCCL version
+  // props->railId = NCCL_NET_ID_UNDEF;  // RCCL: excluded
+  // props->planeId = NCCL_NET_ID_UNDEF; // RCCL: excluded
   return ncclSuccess;
 }
 

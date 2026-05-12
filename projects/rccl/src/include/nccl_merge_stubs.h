@@ -57,8 +57,47 @@ extern "C++" {
 #define COMPILER_ASSUME_ALIGNED(ptr, align)  __builtin_assume_aligned((ptr), (align))
 #define COMPILER_ATTRIBUTE_UNUSED            __attribute__((unused))
 
+// RCCL: NCCL_WIN_STRICT_ORDERING is in NCCL 2.30.4 nccl.h but not in RCCL nccl.h
+#ifndef NCCL_WIN_STRICT_ORDERING
+#define NCCL_WIN_STRICT_ORDERING 0x02
+#endif
+
 // Temporary merge workaround: os.h is NCCL-only; stub ncclOsGetPageSize here
 #include <unistd.h>
 static inline size_t ncclOsGetPageSize() { return (size_t)sysconf(_SC_PAGESIZE); }
+
+// RCCL: ncclTopoGetLocalGinDevs stub — GIN topo not implemented in RCCL;
+// returns device 0 with count 1 so gin_host.cc can proceed.
+// Full topo-aware implementation would require ncclTopoGetLocalGinDev in topo.cc.
+#ifndef _NCCL_TOPO_GIN_DEVS_STUB_
+#define _NCCL_TOPO_GIN_DEVS_STUB_
+struct ncclComm;
+static inline ncclResult_t ncclTopoGetLocalGinDevs(struct ncclComm* /*comm*/, int* localGinDevs, int* localGinCount) {
+  localGinDevs[0] = 0;  // default to first IB device
+  *localGinCount = 1;
+  return ncclSuccess;
+}
+#endif
+
+// RCCL: ncclSetThreadName overload for std::thread (NCCL 2.30.4 uses std::thread,
+// RCCL's existing signature takes pthread_t)
+#ifdef __cplusplus
+#include <thread>
+#include <cstdio>
+#include <cstdarg>
+#ifndef _NCCL_SET_THREAD_NAME_STD_THREAD_
+#define _NCCL_SET_THREAD_NAME_STD_THREAD_
+// Forward decl of the pthread_t overload (defined in debug.cc)
+void ncclSetThreadName(pthread_t thread, const char *fmt, ...);
+static inline void ncclSetThreadName(std::thread& thread, const char *fmt, ...) {
+  char name[16];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(name, sizeof(name), fmt, args);
+  va_end(args);
+  ncclSetThreadName(thread.native_handle(), "%s", name);
+}
+#endif
+#endif // __cplusplus
 
 #endif // NCCL_MERGE_STUBS_H_

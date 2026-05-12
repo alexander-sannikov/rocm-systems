@@ -24,31 +24,11 @@ static bool isLsaAccessible(struct ncclComm* comm, int rank) {
 ncclResult_t ncclRmaWaitSignal(struct ncclComm* comm, struct ncclKernelPlan* plan, cudaStream_t stream){
   ncclResult_t ret = ncclSuccess;
 
-  // If we have both proxy and CE tasks, execute them in parallel
-  if (plan->rmaArgs->nRmaTasksProxy > 0 && plan->rmaArgs->nRmaTasksCe > 0) {
-    cudaStream_t ceStream = comm->rmaState.rmaCeState.ceStream;
-    cudaEvent_t ceEvent = comm->rmaState.rmaCeState.ceEvent;
-
-    // Record event on input stream first to establish dependency
-    CUDACHECKGOTO(cudaEventRecord(ceEvent, stream), ret, fail);
-
-    // Set up CE stream for parallel execution
-    CUDACHECKGOTO(cudaStreamWaitEvent(ceStream, ceEvent, 0), ret, fail);
-
-    // Launch both operations
-    NCCLCHECKGOTO(ncclRmaProxyWaitLaunch(comm, plan, stream), ret, fail);
-    NCCLCHECKGOTO(ncclRmaCeWaitLaunch(comm, plan, ceStream), ret, fail);
-
-    // Synchronize streams
-    CUDACHECKGOTO(cudaEventRecord(ceEvent, ceStream), ret, fail);
-    CUDACHECKGOTO(cudaStreamWaitEvent(stream, ceEvent, 0), ret, fail);
-  }
-  else if (plan->rmaArgs->nRmaTasksProxy > 0) {
+  // RCCL: CE RMA path excluded — proxy path only
+  if (plan->rmaArgs->nRmaTasksProxy > 0) {
     NCCLCHECKGOTO(ncclRmaProxyWaitLaunch(comm, plan, stream), ret, fail);
   }
-  else if (plan->rmaArgs->nRmaTasksCe > 0) {
-    NCCLCHECKGOTO(ncclRmaCeWaitLaunch(comm, plan, stream), ret, fail);
-  }
+  // RCCL: nRmaTasksCe branch excluded (no CE RMA path)
 
 exit:
   return ret;
@@ -60,31 +40,11 @@ fail:
 ncclResult_t ncclRmaPut(struct ncclComm* comm, struct ncclKernelPlan* plan, cudaStream_t stream){
   ncclResult_t ret = ncclSuccess;
 
-  // If we have both proxy and CE tasks, execute them in parallel
-  if (plan->rmaArgs->nRmaTasksProxy > 0 && plan->rmaArgs->nRmaTasksCe > 0) {
-    cudaStream_t ceStream = comm->rmaState.rmaCeState.ceStream;
-    cudaEvent_t ceEvent = comm->rmaState.rmaCeState.ceEvent;
-
-    // Record event on input stream first to establish dependency
-    CUDACHECKGOTO(cudaEventRecord(ceEvent, stream), ret, fail);
-
-    // Set up CE stream for parallel execution
-    CUDACHECKGOTO(cudaStreamWaitEvent(ceStream, ceEvent, 0), ret, fail);
-
-    // Launch both operations
-    NCCLCHECKGOTO(ncclRmaProxyPutLaunch(comm, plan, stream), ret, fail);
-    NCCLCHECKGOTO(ncclRmaCePutLaunch(comm, plan, ceStream), ret, fail);
-
-    // Synchronize streams
-    CUDACHECKGOTO(cudaEventRecord(ceEvent, ceStream), ret, fail);
-    CUDACHECKGOTO(cudaStreamWaitEvent(stream, ceEvent, 0), ret, fail);
-  }
-  else if (plan->rmaArgs->nRmaTasksProxy > 0) {
+  // RCCL: CE RMA path excluded — proxy path only
+  if (plan->rmaArgs->nRmaTasksProxy > 0) {
     NCCLCHECKGOTO(ncclRmaProxyPutLaunch(comm, plan, stream), ret, fail);
   }
-  else if (plan->rmaArgs->nRmaTasksCe > 0) {
-    NCCLCHECKGOTO(ncclRmaCePutLaunch(comm, plan, stream), ret, fail);
-  }
+  // RCCL: nRmaTasksCe branch excluded (no CE RMA path)
 
 exit:
   return ret;
@@ -170,53 +130,24 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
   plan->rmaArgs->func = firstTask->func;
   plan->rmaArgs->nRmaTasks = 0;
   plan->rmaArgs->nRmaTasksProxy = 0;
-  plan->rmaArgs->nRmaTasksCe = 0;
+  // RCCL: nRmaTasksCe excluded (no CE RMA path)
 
   // WaitSignal tasks
   if (firstTask->func == ncclFuncWaitSignal) {
-    // Allocate temporary arrays to hold peers and nsignals for both proxy and CE paths
-    int* peersCe = ncclMemoryStackAlloc<int>(&comm->memScoped, firstTask->npeers);
-    int* nsignalsCe = ncclMemoryStackAlloc<int>(&comm->memScoped, firstTask->npeers);
+    // RCCL: CE path excluded — all peers go to proxy
     NCCLCHECKGOTO(ncclCalloc(&peersProxy, firstTask->npeers), ret, fail);
     NCCLCHECKGOTO(ncclCalloc(&nsignalsProxy, firstTask->npeers), ret, fail);
 
-    int npeersCe = 0;
     int npeersProxy = 0;
 
-    // Go over the firstTask->peers and split them based on LSA accessibility
+    // Route all peers to proxy (CE path excluded in RCCL)
     for (int i = 0; i < firstTask->npeers; i++) {
-      int peerRank = firstTask->peers[i];
-      bool lsaAccessible = isLsaAccessible(comm, peerRank);
-
-      if (lsaAccessible) {
-        // Add to CE list
-        peersCe[npeersCe] = peerRank;
-        nsignalsCe[npeersCe] = firstTask->nsignals[i];
-        npeersCe++;
-      } else {
-        // Add to Proxy list
-        peersProxy[npeersProxy] = peerRank;
-        nsignalsProxy[npeersProxy] = firstTask->nsignals[i];
-        npeersProxy++;
-      }
+      peersProxy[npeersProxy] = firstTask->peers[i];
+      nsignalsProxy[npeersProxy] = firstTask->nsignals[i];
+      npeersProxy++;
     }
 
-    // Initialize the CE task if there are CE peers
-    if (npeersCe > 0) {
-      struct ncclTaskRma* waitSignalTaskCe = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
-      waitSignalTaskCe->func = ncclFuncWaitSignal;
-      waitSignalTaskCe->ctx = firstTask->ctx;
-      waitSignalTaskCe->signalMode = firstTask->signalMode;
-      waitSignalTaskCe->peers = peersCe;
-      waitSignalTaskCe->nsignals = nsignalsCe;
-      waitSignalTaskCe->npeers = npeersCe;
-      ncclIntruQueueEnqueue(&plan->rmaTaskQueueCe, waitSignalTaskCe);
-      plan->rmaArgs->nRmaTasksCe = 1;
-    } else {
-      plan->rmaArgs->nRmaTasksCe = 0;
-    }
-
-    // Initialize the Proxy task if there are Proxy peers
+    // Initialize the Proxy task
     if (npeersProxy > 0) {
       struct ncclTaskRma* waitSignalTaskProxy = ncclMemoryPoolAlloc<struct ncclTaskRma>(&comm->memPool_ncclTaskRma, &comm->memPermanent);
       waitSignalTaskProxy->func = ncclFuncWaitSignal;
@@ -235,26 +166,18 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
       plan->rmaArgs->nRmaTasksProxy = 0;
     }
 
-    plan->rmaArgs->nRmaTasks = (npeersCe > 0 ? 1 : 0) + (npeersProxy > 0 ? 1 : 0);
+    plan->rmaArgs->nRmaTasks = (npeersProxy > 0 ? 1 : 0);
     planner->nTasksRma -= 1;
-    // Free the original WaitSignal task (split into CE and Proxy tasks)
+    // Free the original WaitSignal task (now in Proxy task)
     ncclMemoryPoolFree(&comm->memPool_ncclTaskRma, firstTask);
   }
-  // Put/Signal tasks
+  // Put/Signal tasks — RCCL: CE path excluded, all go to proxy
   else {
-    // Check if the first task is LSA accessible
-    bool lsaAccessible = isLsaAccessible(comm, firstTask->peer);
-
     plan->rmaArgs->nRmaTasks = 1;
-    plan->rmaArgs->nRmaTasksProxy = lsaAccessible ? 0 : 1;
-    plan->rmaArgs->nRmaTasksCe = lsaAccessible ? 1 : 0;
+    plan->rmaArgs->nRmaTasksProxy = 1;
+    // RCCL: nRmaTasksCe always 0 (CE excluded)
 
-    if (lsaAccessible) {
-      ncclIntruQueueEnqueue(&plan->rmaTaskQueueCe, firstTask);
-    } else {
-      ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, firstTask);
-    }
-
+    ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, firstTask);
     planner->nTasksRma -= 1;
 
     // Batch consecutive tasks from the same context that match operation category
@@ -266,24 +189,17 @@ ncclResult_t scheduleRmaTasksToPlan(struct ncclComm* comm, struct ncclKernelPlan
         break;
       }
 
-      bool lsaAccessible = isLsaAccessible(comm, task->peer);
-
-      // If the task can be batched, remove from context queue and add to plan
+      // RCCL: CE path excluded — all tasks to proxy
       ncclIntruQueueDequeue(ctxQueue);
-      if (lsaAccessible) {
-        ncclIntruQueueEnqueue(&plan->rmaTaskQueueCe, task);
-        plan->rmaArgs->nRmaTasksCe++;
-      } else {
-        ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, task);
-        plan->rmaArgs->nRmaTasksProxy++;
-      }
+      ncclIntruQueueEnqueue(&plan->rmaTaskQueueProxy, task);
+      plan->rmaArgs->nRmaTasksProxy++;
       plan->rmaArgs->nRmaTasks++;
       planner->nTasksRma -= 1;
     }
   }
 
-  INFO(NCCL_COLL, "scheduleRmaTasksToPlan: rank=%d ctx=%d func=%d nRmaTasks=%d nRmaTasksProxy=%d nRmaTasksCe=%d",
-    comm->rank, ctx, plan->rmaArgs->func, plan->rmaArgs->nRmaTasks, plan->rmaArgs->nRmaTasksProxy, plan->rmaArgs->nRmaTasksCe);
+  INFO(NCCL_COLL, "scheduleRmaTasksToPlan: rank=%d ctx=%d func=%d nRmaTasks=%d nRmaTasksProxy=%d (CE excluded)",
+    comm->rank, ctx, plan->rmaArgs->func, plan->rmaArgs->nRmaTasks, plan->rmaArgs->nRmaTasksProxy);
 
 exit:
   return ret;

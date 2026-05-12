@@ -324,4 +324,34 @@ static ncclResult_t ncclGdrCudaFree(void* gdrHandle) {
 }
 #endif
 
+// RCCL: allocMemCPUAccessible — ported from NCCL 2.30.4 for GIN host API.
+// Allocates memory accessible from both CPU and GPU (either GDR or pinned host).
+// The manager parameter is unused in RCCL (always NULL from gin callers).
+struct ncclMemManager; // forward decl
+template <typename T>
+static ncclResult_t allocMemCPUAccessible(T **ptr, T **devPtr, size_t nelem, int /*host_flags*/,
+                                          void **gdrHandle, struct ncclMemManager* /*manager*/,
+                                          bool forceHost = false) {
+  if (ncclGdrCopy && !forceHost) {
+    NCCLCHECK(ncclGdrCudaCalloc(ptr, devPtr, nelem, gdrHandle));
+  } else {
+    NCCLCHECK(ncclCuMemHostAlloc((void **)ptr, (CUmemGenericAllocationHandle *)NULL, nelem * sizeof(T)));
+    memset((void *)*ptr, 0, nelem * sizeof(T));
+    *devPtr = *ptr;
+    if (gdrHandle) *gdrHandle = NULL;
+  }
+  return ncclSuccess;
+}
+
+// RCCL: freeMemCPUAccessible — partner to allocMemCPUAccessible
+template <typename T>
+static ncclResult_t freeMemCPUAccessible(T *ptr, void *gdrHandle, struct ncclMemManager* /*manager*/) {
+  if (gdrHandle != NULL) {
+    NCCLCHECK(ncclGdrCudaFree(gdrHandle));
+  } else {
+    NCCLCHECK(ncclCuMemHostFree(ptr));
+  }
+  return ncclSuccess;
+}
+
 #endif // End include guard

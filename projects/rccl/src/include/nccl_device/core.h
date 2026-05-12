@@ -72,6 +72,14 @@ struct ncclDevCommRequirements {
   bool lsaMultimem; // Enable multimem on lsa team
 
   int lsaBarrierCount;
+
+  // RCCL: GIN host API fields from NCCL 2.30.4
+  int ginContextCount;
+  int ginSignalCount;
+  int ginCounterCount;
+  bool ginExclusiveContexts;
+  int ginQueueDepth;
+  int ginTrafficClass;
 };
 
 struct ncclDevResourceRequirements {

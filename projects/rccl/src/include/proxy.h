@@ -20,6 +20,8 @@
 #include "collectives.h"
 #include "proxy_trace/proxy_trace.h"
 
+struct ncclGinState;
+
 typedef enum : uint8_t {
   ncclPatternRing,
   ncclPatternRingTwice,
@@ -339,6 +341,7 @@ struct ncclIpcHdr {
 
 struct ncclProxyState {
   int refCount;
+  struct ncclComm* comm;
   int tpRank;
   int tpnRanks;
   int tpLocalnRanks;
@@ -351,6 +354,7 @@ struct ncclProxyState {
   bool dmaBufSupport;
   ncclNet_t* ncclNet;
   ncclCollNet_t* ncclCollNet;
+  struct ncclGinState* ginState;
   uint32_t* abortFlag;
   bool directMode;
   // Service threads

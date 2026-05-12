@@ -131,6 +131,10 @@ struct ncclCommEventCallback {
   ncclResult_t(*fn)(struct ncclComm* comm, struct ncclCommEventCallback* cb);
 };
 
+// GIN host state: must be included before ncclSharedResources uses ncclGinState
+struct ncclComm; // forward-declare for gin_host.h function signatures
+#include "gin/gin_host.h"
+
 struct ncclSharedResources {
   int refCount;
   struct ncclComm* owner; /* comm which creates this shared res. */
@@ -156,6 +160,9 @@ struct ncclSharedResources {
 
   /* proxy related shared res */
   struct ncclProxyState* proxyState;
+
+  // GIN state
+  struct ncclGinState ginState;
 };
 
  /**
@@ -552,6 +559,9 @@ struct ncclComm {
 
   ncclNet_t* ncclNet;
   void* netContext;
+  void* ginContext;
+  void* rmaGinContext;
+  int ginPluginIndex; // RCCL: added for NCCL 2.30.4 GIN host API
   int netPluginIndex;
   int ncclNetVer;
   ncclNetDeviceType netDeviceType;
@@ -798,6 +808,7 @@ struct ncclComm {
 
   // RMA state
   struct ncclRmaState rmaState;
+  ncclGinConnectionType_t globalGinSupport;
   bool hostRmaSupport;
 
   // buffer registration cache
