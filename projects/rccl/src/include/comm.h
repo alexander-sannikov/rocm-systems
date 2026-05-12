@@ -529,6 +529,10 @@ struct ncclPeerInfo {
 #endif
   int cuMemSupport;
   int version;
+  ncclGinType_t supportedGinType;
+  bool crossNicSupport;
+  bool rmaPluginAvailable;
+  bool cuMemGdrSupport;
 };
 
 typedef enum ncclGroupTaskType {
@@ -809,6 +813,7 @@ struct ncclComm {
   // RMA state
   struct ncclRmaState rmaState;
   ncclGinConnectionType_t globalGinSupport;
+  bool globalRmaProxySupport;
   bool hostRmaSupport;
 
   // buffer registration cache

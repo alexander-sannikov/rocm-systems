@@ -592,6 +592,8 @@ skip_profiling:
   for (int channel=0; channel<MAXCHANNELS; channel++)
     NCCLCHECK(freeChannel(comm->channels+channel, comm->nRanks, 1, comm->localRanks));
 
+  // GIN host teardown must precede RMA proxy finalization (item G).
+  NCCLCHECK(ncclGinHostFinalize(comm));
   // RMA proxy must be finalized before destroying the proxy.
   NCCLCHECK(ncclRmaProxyFinalize(comm));
 
@@ -1175,6 +1177,16 @@ static ncclResult_t fillInfo(struct ncclComm* comm, struct ncclPeerInfo* info, u
     }
 #endif
 
+  // HOST-API capability fields (item B)
+  info->supportedGinType   = comm->sharedRes->ginState.ginType;
+  info->rmaPluginAvailable = (comm->rmaState.rmaProxyState.ncclGin != nullptr);
+  // crossNicSupport: ncclTopoCheckCrossNicSupport not yet available in RCCL — conservative stub
+  // TODO: call ncclTopoCheckCrossNicSupport when it is implemented
+  info->crossNicSupport    = false;
+  // cuMemGdrSupport: use hasFineGrain as the ROCm equivalent of GDR support
+  // TODO: refine once a dedicated ROCm cuMem-GDR query is available
+  info->cuMemGdrSupport    = info->hasFineGrain;
+
   return ncclSuccess;
 }
 
@@ -1347,6 +1359,10 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   int* pxnPeers = NULL;
   int *topParentLocalRanks = NULL;
   int p2pLevel = -1;
+  // HOST-API capability reduction accumulators (item C)
+  bool globalGinEnabled        = (comm->sharedRes->ginState.ginType != NCCL_GIN_TYPE_NONE);
+  bool globalRmaPluginSupport  = (comm->rmaState.rmaProxyState.ncclGin != nullptr);
+  bool globalCrossNicSupport   = true;  // reduced to false if any rank has crossNicSupport==false
 
   timers[TIMER_INIT_ALLGATHER] = clockNano();
   // AllGather1 - begin
@@ -1370,6 +1386,11 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
       ret = ncclInvalidUsage;
       goto fail;
     }
+    // HOST-API capability reduction (item C): fold each peer's support flags.
+    if (comm->peerInfo[i].supportedGinType != comm->sharedRes->ginState.ginType)
+      globalGinEnabled = false;
+    globalRmaPluginSupport &= comm->peerInfo[i].rmaPluginAvailable;
+    globalCrossNicSupport  &= comm->peerInfo[i].crossNicSupport;
   }
 
   // AllGather1 - end
@@ -1935,6 +1956,16 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
     int nLocalsPow2 = pow2Up(nLocals);
     comm->p2pSchedule = ncclMemoryStackAlloc<ncclComm::P2pSchedulePair>(&comm->memPermanent, nRanks);
     comm->planner.peers = ncclMemoryStackAlloc<ncclKernelPlanner::Peer>(&comm->memPermanent, nRanks);
+    // Initialize per-context RMA task queues (item F).
+    if (comm->config.numRmaCtx > 0) {
+      comm->planner.rmaTaskQueues = ncclMemoryStackAlloc<
+        struct ncclIntruQueue<struct ncclTaskRma, &ncclTaskRma::next>>(
+          &comm->memPermanent, comm->config.numRmaCtx);
+      for (int i = 0; i < comm->config.numRmaCtx; i++)
+        ncclIntruQueueConstruct(&comm->planner.rmaTaskQueues[i]);
+    } else {
+      comm->planner.rmaTaskQueues = nullptr;
+    }
     uint32_t nodeRound = 0;
     uint32_t nodeDelta = 0;
     int round = 0;
@@ -2090,6 +2121,21 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   }
 
   comm->symmetricSupport = comm->isAllDirectP2p && comm->nNodes == 1 && ncclParamWinEnable() && ncclCuMemEnable();
+
+  // Map reduced flags to comm-level GIN/RMA support (item C).
+  // NCCL distinguishes FULL vs RAIL based on cross-NIC topology; RCCL uses FULL
+  // when all ranks share the same ginType and cross-NIC is available, NONE otherwise.
+  // globalNicFused and globalCuMemGdrSupport checks are omitted (not applicable to RCCL).
+  comm->globalGinSupport = NCCL_GIN_CONNECTION_NONE;
+  if (globalGinEnabled) {
+    comm->globalGinSupport = globalCrossNicSupport ? NCCL_GIN_CONNECTION_FULL : NCCL_GIN_CONNECTION_RAIL;
+  }
+  comm->globalRmaProxySupport = globalRmaPluginSupport && globalCrossNicSupport;
+
+  // Assign hostRmaSupport (item E).
+  // ncclDevrIsOneLsaTeam() not yet implemented — omitted (plan_hj_dev_runtime.md item H).
+  comm->hostRmaSupport = comm->symmetricSupport && comm->globalRmaProxySupport;
+
   comm->devrState.bigSize = 0;
 
   comm->ceColl.baseUCSymReadyPtr = NULL;
