@@ -65,6 +65,14 @@ struct ncclDevrState {
 
   struct ncclIntruQueue<struct ncclDevrRegTask, &ncclDevrRegTask::next> regTaskQueue;
   struct ncclIntruQueue<struct ncclDevrCommCreateTask, &ncclDevrCommCreateTask::next> commCreateTaskQueue;
+
+  // Item K: GIN/RMA proxy flags.
+  // ginEnabled: true when device-side GIN connections have been activated.
+  // RCCL proxy-only path: never set to true (no device-side GIN).
+  bool ginEnabled;
+  // rmaProxyEnabled: true when the RMA proxy path is available for symmetric memory.
+  // Set from comm->globalRmaProxySupport during ncclDevrInitOnce.
+  bool rmaProxyEnabled;
 };
 
 // We assume ncclComm has a `ncclDevrState symState` member.
@@ -75,6 +83,14 @@ ncclResult_t ncclDevrFinalize(struct ncclComm* comm);
 ncclResult_t ncclDevrFindWindow(struct ncclComm* comm, void const* userPtr, struct ncclDevrWindow** outWin);
 bool ncclDevrWindowIsMultiSegment(struct ncclDevrWindow* win);
 bool ncclDevrWindowHasSysmemSegment(struct ncclDevrWindow* win);
+
+// Item H: returns true iff the entire communicator fits in a single LSA team.
+// RCCL stub: always returns false (proxy-only path; no full-comm LSA).
+bool ncclDevrIsOneLsaTeam(struct ncclComm* comm);
+
+// Item I: maps a world rank to its LSA-team-local rank.
+// RCCL stub: identity mapping (proxy-only; LSA teams are not used for inter-node comms).
+ncclResult_t ncclDevrWorldToLsaRank(struct ncclComm* comm, int peerWorldRank, int* peerLsaRank);
 
 ncclResult_t ncclDevrWindowRegisterInGroup(
   struct ncclComm* comm, void* ptr, size_t size, int winFlags, ncclWindow_t* outWinDev

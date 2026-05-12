@@ -9,6 +9,7 @@
 #include "nccl.h"
 #include "alloc.h"
 #include "channel.h"
+#include "dev_runtime.h"
 #include "nvmlwrap.h"
 #include "gdrwrap.h"
 #include "bootstrap.h"
@@ -2132,9 +2133,11 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   }
   comm->globalRmaProxySupport = globalRmaPluginSupport && globalCrossNicSupport;
 
-  // Assign hostRmaSupport (item E).
-  // ncclDevrIsOneLsaTeam() not yet implemented — omitted (plan_hj_dev_runtime.md item H).
-  comm->hostRmaSupport = comm->symmetricSupport && comm->globalRmaProxySupport;
+  // Assign hostRmaSupport (item E / item H).
+  // NCCL: symmetricSupport && (isOneLsaTeam || globalRmaProxySupport).
+  // RCCL proxy-only: ncclDevrIsOneLsaTeam() always returns false, so the expression
+  // reduces to symmetricSupport && globalRmaProxySupport.
+  comm->hostRmaSupport = comm->symmetricSupport && (ncclDevrIsOneLsaTeam(comm) || comm->globalRmaProxySupport);
 
   comm->devrState.bigSize = 0;
 

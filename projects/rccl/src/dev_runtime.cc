@@ -22,6 +22,9 @@ struct ncclDevrMemory {
   size_t bigOffset; // offset in big VA space
   int maxGlobalNumSegments;    // max(numSegments) across all communicator ranks
   bool globalHasSysmemSegment; // true if any communicator rank has a sysmem segment
+  // GIN segment registration state (Item J).
+  // numGinSegments == 1 when device-side GIN is inactive (RCCL proxy-only path).
+  int numGinSegments;
 };
 
 struct ncclDevrWindowSorted {
@@ -92,6 +95,13 @@ ncclResult_t ncclDevrInitOnce(struct ncclComm* comm) {
   
   ncclSpaceConstruct(&devr->bigSpace);
   ncclShadowPoolConstruct(&devr->shadows);
+
+  // Item K: GIN/RMA proxy flags.
+  // RCCL proxy-only path: device-side GIN is never activated.
+  devr->ginEnabled = false;
+  // rmaProxyEnabled: true when RMA proxy is globally supported for this communicator.
+  devr->rmaProxyEnabled = comm->globalRmaProxySupport;
+
   return ncclSuccess;
 
 fail_lsaRankList:
@@ -369,6 +379,8 @@ static ncclResult_t symMemoryObtain(
   mem->refCount = 0;
   mem->memHandle = memHandle;
   mem->size = size;
+  // RCCL: proxy-only path; device-side GIN is not enabled, so always 1 GIN segment.
+  mem->numGinSegments = 1;
  
   // Grab offset in the big space.
   NCCLCHECKGOTO(ncclSpaceAlloc(&devr->bigSpace, devr->bigSize, size, devr->granularity, &bigOffset), ret, fail_mem);
@@ -427,6 +439,39 @@ static void symMemoryDropRef(
   }
 }
 
+// Item J: allocAndPopulateSegmentWindows
+// Allocates shadow-pool memory for per-segment window descriptors and populates
+// them from the GIN registration state stored in mem->ginSegmentInfos.
+// In RCCL's proxy-only path devr->ginEnabled is always false, so the GIN-filling
+// body is skipped; only the shadow pool allocation is performed.
+static ncclResult_t allocAndPopulateSegmentWindows(
+    struct ncclDevrState* devr, struct ncclDevrMemory* mem,
+    cudaStream_t stream, struct ncclSegmentWindow** outSegmentWindowsDev,
+    struct ncclSegmentWindow** outSegmentWindowsHost) {
+  ncclResult_t ret = ncclSuccess;
+  struct ncclSegmentWindow* segmentWindowsDev = nullptr;
+  struct ncclSegmentWindow* segmentWindowsHost = nullptr;
+
+  NCCLCHECKGOTO(ncclShadowPoolAlloc(&devr->shadows,
+      sizeof(struct ncclSegmentWindow) * mem->numGinSegments,
+      (void**)&segmentWindowsDev, (void**)&segmentWindowsHost, stream), ret, fail);
+
+  // RCCL: devr->ginEnabled is always false (proxy-only, no device-side GIN).
+  // The GIN segment-info copy block from NCCL is intentionally omitted here.
+  // If device-side GIN is ever enabled in RCCL, add the ginSegmentInfos population
+  // and cudaMemcpyAsync here, mirroring NCCL dev_runtime.cc allocAndPopulateSegmentWindows.
+
+  *outSegmentWindowsDev = segmentWindowsDev;
+  *outSegmentWindowsHost = segmentWindowsHost;
+
+exit:
+  return ret;
+fail:
+  if (segmentWindowsDev != nullptr)
+    ncclShadowPoolFree(&devr->shadows, segmentWindowsDev, stream);
+  goto exit;
+}
+
 static ncclResult_t symWindowTableInitOnce(struct ncclComm* comm, cudaStream_t stream) {
   struct ncclDevrState* devr = &comm->devrState;
   struct ncclDevCommWindowTable* tableDev = devr->windowTable;
@@ -472,6 +517,14 @@ static ncclResult_t symWindowCreate(
   winDevHost->lsaRank = devr->lsaSelf;
   winDevHost->worldRank = comm->rank;
   winDevHost->winHost = (void*)win;
+
+  // Item J: allocate per-segment window descriptors (multi-segment VA support).
+  { struct ncclSegmentWindow* segmentWindowsDev;
+    struct ncclSegmentWindow* segmentWindowsHost;
+    NCCLCHECK(allocAndPopulateSegmentWindows(devr, mem, stream, &segmentWindowsDev, &segmentWindowsHost));
+    winDevHost->ginMultiSegmentWins = segmentWindowsDev;
+  }
+
   CUDACHECK(cudaMemcpyAsync(winDev, winDevHost, sizeof(struct ncclWindow_vidmem), cudaMemcpyHostToDevice, stream));
 
   NCCLCHECK(symWindowTableInitOnce(comm, stream)); // ensure devr->windowTable exists
@@ -520,6 +573,10 @@ static ncclResult_t symWindowDestroy(struct ncclComm* comm, struct ncclWindow_vi
   winHost = (struct ncclDevrWindow*)winDevHost->winHost;
 
   symMemoryDropRef(comm, winHost->memory);
+
+  // Item J: free the per-segment window array allocated by allocAndPopulateSegmentWindows.
+  if (winDevHost->ginMultiSegmentWins != nullptr)
+    NCCLCHECKGOTO(ncclShadowPoolFree(&devr->shadows, winDevHost->ginMultiSegmentWins, stream), ret, remove_winSorted);
 
   { struct ncclDevCommWindowTable* tableDev = devr->windowTable;
     struct ncclDevCommWindowTable* tableHost;
@@ -883,6 +940,27 @@ bool ncclDevrWindowIsMultiSegment(struct ncclDevrWindow* win) {
 
 bool ncclDevrWindowHasSysmemSegment(struct ncclDevrWindow* win) {
   return win != NULL && win->memory->globalHasSysmemSegment;
+}
+
+// Item H: ncclDevrIsOneLsaTeam stub.
+// RCCL uses the GIN proxy path only — all inter-node ranks are unreachable via LSA.
+// The LSA team is always a strict subset of the world (or a singleton), never the full
+// communicator, so this always returns false.
+bool ncclDevrIsOneLsaTeam(struct ncclComm* comm) {
+  // RCCL: LSA not used — proxy path only. Always returns false.
+  (void)comm;
+  return false;
+}
+
+// Item I: ncclDevrWorldToLsaRank stub.
+// Since no LSA teams span the full communicator in RCCL's proxy-only path, any caller
+// that reaches this function is operating under incorrect assumptions. Return an identity
+// mapping as a safe placeholder (the proxy path never uses the LSA rank for non-LSA peers).
+ncclResult_t ncclDevrWorldToLsaRank(struct ncclComm* comm, int peerWorldRank, int* peerLsaRank) {
+  // RCCL: LSA not used — proxy path only. Identity mapping.
+  (void)comm;
+  *peerLsaRank = peerWorldRank;
+  return ncclSuccess;
 }
 
 NCCL_API(ncclResult_t, ncclDevCommCreate, ncclComm_t comm, ncclDevCommRequirements_t const* reqs, ncclDevComm_t* outDevComm);
