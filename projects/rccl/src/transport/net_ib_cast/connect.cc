@@ -52,6 +52,7 @@ struct ncclIbHandle {
   union ncclSocketAddress connectAddr; // Filled by the target
   uint64_t magic; // random number to help debugging
   int isP2p;
+  bool isRMA;
   struct ncclIbCommStage stage; // Used by the other side when connecting
 };
 
@@ -827,14 +828,18 @@ ib_recv_dev_list:
   comm->base.vProps = mergedDev->vProps;
   // Read isP2p from handle
   isP2p = handle->isP2p;
-  comm->useCtsOffload = IbCastIsCtsOffloadEnabled(isP2p);
+  comm->useCtsOffload = IbCastIsCtsOffloadEnabled(isP2p) && !handle->isRMA;
   if (comm->useCtsOffload) {
     comm->base.recvMatchingScheme = BY_ORDER;
   }
 
-  INFO(NCCL_NET, "NET/IB: IbCastConnect isP2p=%d", isP2p);
+  INFO(NCCL_NET, "NET/IB: IbCastConnect isP2p=%d isRMA=%d", isP2p, handle->isRMA);
   comm->base.nqps = IbCastCalculateNqps(isP2p, comm->base.vProps.ndevs, 
                                          remoteVProps.ndevs, __func__);
+  if (handle->isRMA) {
+    comm->base.nqps = 1;
+  }
+
   comm->base.nDataQps = std::max(comm->base.vProps.ndevs, remoteVProps.ndevs);
 
   if (comm->base.resiliency) {
@@ -862,6 +867,7 @@ ib_recv_dev_list:
   memset(&meta, 0, sizeof(meta));
   meta.ndevs = comm->base.vProps.ndevs;
   meta.isP2p = isP2p;
+  meta.isRMA = handle->isRMA;
 
   // Create QPs on the sender side
   NCCLCHECKGOTO(IbCastSenderQpsCreate(comm, &meta, channelId), ret, fail);
@@ -1451,8 +1457,8 @@ ib_recv:
   // Determine if Flush is enabled for this Comm. Must be done before creating
   // QPs. If Flush is enabled, extra QPs will be created for Flush operations.
   useDmaBuf  = (IbCastDmaBufSupport(lComm->dev) == ncclSuccess && ncclParamDmaBufEnable());
-  rComm->flushEnabled = ((IbCastGdrSupport() == ncclSuccess || useDmaBuf) && (!IbCastOffloadEnabled)
-                            && (ncclParamIbCastGdrFlushDisable() == 0)) ? 1 : 0;
+  rComm->flushEnabled = (((IbCastGdrSupport() == ncclSuccess || useDmaBuf) && (!IbCastOffloadEnabled)
+                            && (ncclParamIbCastGdrFlushDisable() == 0)) || remMeta.isRMA) ? 1 : 0;
 
   NCCLCHECKGOTO(IbCastReceiverQpsCreateToRts(rComm, &remMeta, &meta, channelId), ret, fail);
   if (rComm->prepostReceiveWorkRequests) {
@@ -1653,4 +1659,3 @@ ncclResult_t rcclCastNetP2pPolicy(void* handle, int isP2p) {
   ibHandle->isP2p = isP2p;
   return ncclSuccess;
 }
-

@@ -71,6 +71,7 @@ struct ncclIbConnectionMetadata {
   int tc;
   int sl;
   int isP2p;
+  bool isRMA;
 };
 
 ncclResult_t IbCastQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* createQpAttrs);
