@@ -50,8 +50,8 @@ static ncclResult_t IbCastGinIbGdrGpuSupport(bool gdaki) {
   int dmaBufSupportOnDevice = 1;
   CUCHECK(cuDeviceGetAttribute(&dmaBufSupportOnDevice, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, cudaDev));
   if (dmaBufSupportOnDevice == 1) return ncclSuccess;
-#endif
   WARN("Unable to use GIN: Peermem is not supported, and device %d does not support DMA-BUF.", cudaDev);
+#endif
   return ncclInvalidUsage;
 }
 
