@@ -38,14 +38,15 @@ struct ncclDevComm {
   ncclLsaBarrierHandle_t lsaBarrier;
   ncclGinBarrierHandle_t railGinBarrier;
 
-  uint8_t ginContextCount;
-  uint8_t ginTypes[4];
-  void* ginHandles[4];
-  uint32_t ginSignalBase;
+#ifndef NCCL_GIN_MAX_CONNECTIONS
+#define NCCL_GIN_MAX_CONNECTIONS 4
+#endif
+  uint8_t ginConnectionCount;
+  uint8_t ginNetDeviceTypes[NCCL_GIN_MAX_CONNECTIONS];
+  void* ginHandles[NCCL_GIN_MAX_CONNECTIONS];
   int ginSignalCount;
-  uint32_t ginCounterBase;
   int ginCounterCount;
-  uint64_t* ginSignalShadows;
+  uint32_t ginContextCount;
 };
 
 #endif // _NCCL_DEVICE_COMM__TYPES_H_

@@ -7,7 +7,9 @@
 
 #include "nccl.h"
 #include "checks.h"
-#include "compiler.h"
+// TODO: compiler.h is NCCL-only; symbols inlined in nccl_merge_stubs.h (temporary merge W/A)
+// #include "compiler.h"
+#include "nccl_merge_stubs.h"
 #include "comm.h"
 #include "rma/rma_proxy.h"
 

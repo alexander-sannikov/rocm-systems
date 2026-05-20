@@ -41,6 +41,8 @@
 #define NCCL_NET_MAX_DEVS_PER_NIC 4
 
 #include "net/net_v11.h"
+/* TODO: temporary merge workaround: should be removed after net_v12.h integration */
+typedef ncclNetProperties_v11_t ncclNetProperties_v12_t;
 #include "net/net_v10.h"
 #include "net/net_v9.h"
 #include "net/net_v8.h"

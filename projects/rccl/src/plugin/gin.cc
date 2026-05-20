@@ -14,6 +14,8 @@
 #include <string.h>
 #include <errno.h>
 #include <mutex>
+//Temporary stubs
+#include "nccl_merge_stubs.h"
 
 typedef ncclGin_t* getNcclGin_t(void* ginPluginLib);
 
@@ -226,6 +228,8 @@ static void initPluginLibsOnceFunc() {
   }
 
   // Add internal ib plugin
+  // Remove this ifdef after NET-IB integration.
+#if NCCL_2_30_0_OR_LATER_MERGED 
   ginPluginLibs[pluginCounter].ncclGin = &ncclGinIb;
   ginPluginLibs[pluginCounter].ncclGinPluginState = ncclGinPluginStateInitReady;
   ginPluginLibs[pluginCounter].ncclGinVersion = ncclGinVersion[0];
@@ -233,6 +237,19 @@ static void initPluginLibsOnceFunc() {
   ginPluginLibs[pluginCounter].ncclRmaPluginState = ncclGinPluginStateInitReady;
   ginPluginLibs[pluginCounter].ncclGinVersion = ncclGinVersion[0];
   pluginCounter++;
+#endif
+
+  const char* envNet = ncclGetEnv("NCCL_NET");
+  if (envNet && strcasecmp(envNet, "IB-CAST") == 0) {
+    ginPluginLibs[pluginCounter].ncclGin = &IbCastGinIb;
+    ginPluginLibs[pluginCounter].ncclGinPluginState = ncclGinPluginStateInitReady;
+    ginPluginLibs[pluginCounter].ncclGinVersion = ncclGinVersion[0];
+    ginPluginLibs[pluginCounter].ncclRma = &IbCastGinIbProxy;
+    ginPluginLibs[pluginCounter].ncclRmaPluginState = ncclGinPluginStateInitReady;
+    ginPluginLibs[pluginCounter].ncclGinVersion = ncclGinVersion[0];
+    pluginCounter++;
+  }
+
   pluginCount = pluginCounter;
 }
 

@@ -14,7 +14,8 @@
 #include "gdrwrap.h"
 #include "comm.h"
 #include "bootstrap.h"
-#include "compiler.h"
+// #include "compiler.h"
+#include "nccl_merge_stubs.h"
 #include "rma/rma.h"
 #include "rma/rma_proxy.h"
 #include "dev_runtime.h"
@@ -23,8 +24,7 @@
 #else
 #define NCCL_GIN_PROXY_VERSION 100  /* stub value; GIN proxy not used at runtime on Windows */
 #endif
-#include "os.h"
-
+//#include "os.h"
 
 extern int64_t ncclParamDmaBufEnable();
 extern int64_t ncclParamIbDataDirect();
@@ -42,6 +42,7 @@ void ncclDumpRmaProxyState(int signal);
 
 // ---- Internal helpers ----
 
+#if !defined(__HIP_PLATFORM_AMD__) && ! defined(__HIPCC__)
 static ncclResult_t getDmaBufFd(void *addr, size_t length, int *fd,
                                 bool forceNonDataDirect = false) {
   if (ncclParamDmaBufEnable() == 0) return ncclInvalidUsage;
@@ -66,6 +67,7 @@ static ncclResult_t getDmaBufFd(void *addr, size_t length, int *fd,
 
   return ncclInvalidUsage;
 }
+#endif
 
 // Check if the GIN plugin supports DMA-BUF, if so we can try to get the DMA-BUF handle from CUDA,
 // if that fails we fallback to non-DMA-BUF
@@ -115,7 +117,7 @@ static ncclResult_t ncclRmaProxyCtxAlloc(struct ncclComm* comm, ncclGin_t* ginCo
   // Enforcing strong ordering on the signals mr is vital to ensure ordering between puts and signals.
   size_t signalsBufSize = (comm->nRanks + 1) * sizeof(uint64_t);
   NCCLCHECK(ncclCuMemAlloc((void **)&rmaProxyCtx->signalsDev, &rmaProxyCtx->signalsCumemhandle,
-                           CU_MEM_HANDLE_TYPE_NONE, signalsBufSize, comm->memManager));
+                           CU_MEM_HANDLE_TYPE_NONE, signalsBufSize /*, comm->memManager*/));
   CUDACHECK(cudaMemset(rmaProxyCtx->signalsDev, 0, signalsBufSize));
   NCCLCHECK(ncclRmaProxyRegMrSym(ginComm, rmaProxyCtx->ginCollComm, rmaProxyCtx->props, rmaProxyCtx->signalsDev, signalsBufSize,
                                  NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO,
@@ -183,7 +185,7 @@ static ncclResult_t ncclRmaProxyCtxAllocGraph(struct ncclComm* comm, ncclGin_t* 
   // Allocate the flush buffer on the GPU and then register the memory region with the GIN plugin.
   size_t flushBufSize = comm->nRanks * sizeof(uint64_t);
   NCCLCHECK(ncclCuMemAlloc((void **)&rmaProxyCtx->flushBufDev, &rmaProxyCtx->flushBufCumemhandle,
-                            CU_MEM_HANDLE_TYPE_NONE, flushBufSize, comm->memManager));
+                            CU_MEM_HANDLE_TYPE_NONE, flushBufSize/*, comm->memManager*/));
   CUDACHECK(cudaMemset(rmaProxyCtx->flushBufDev, 0, flushBufSize));
   NCCLCHECK(ncclRmaProxyRegMrSym(ginComm, rmaProxyCtx->ginCollComm, rmaProxyCtx->props, rmaProxyCtx->flushBufDev, flushBufSize,
                                   NCCL_PTR_CUDA, NCCL_NET_MR_FLAG_FORCE_SO,
@@ -297,12 +299,12 @@ ncclResult_t ncclRmaProxyDestroyContext(ncclGin_t* ginComm, void* rmaProxyCtx){
   // Free signals
   if (ginComm && ctx->ginCollComm && ctx->signalsMhandle)
     NCCLCHECK(ginComm->deregMrSym(ctx->ginCollComm, ctx->signalsMhandle));
-  if (ctx->signalsDev) NCCLCHECK(ncclCudaFree(ctx->signalsDev, ctx->comm->memManager));
+  if (ctx->signalsDev) NCCLCHECK(ncclCudaFree(ctx->signalsDev/*, ctx->comm->memManager*/));
 
   // Free flush buffer
   if (ginComm && ctx->ginCollComm && ctx->flushBufMhandle)
     ginComm->deregMrSym(ctx->ginCollComm, ctx->flushBufMhandle);
-  if (ctx->flushBufDev) ncclCudaFree(ctx->flushBufDev, ctx->comm->memManager);
+  if (ctx->flushBufDev) ncclCudaFree(ctx->flushBufDev/*, ctx->comm->memManager*/);
 
   // Free CPU-accessible signals
   if (ginComm && ctx->ginCollComm && ctx->cpuAccessSignalsMhandle)

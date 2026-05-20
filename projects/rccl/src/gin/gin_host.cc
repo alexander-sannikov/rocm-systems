@@ -13,7 +13,9 @@
 #include "register_inline.h"
 #include "gin/gin_host.h"
 #include "gin/gin_host_proxy.h"
-#include "compiler.h"
+// TODO: compiler.h is NCCL-only; symbols inlined in nccl_merge_stubs.h (temporary merge W/A)
+// #include "compiler.h"
+#include "nccl_merge_stubs.h"
 #include <cmath>
 
 NCCL_PARAM(GinEnable, "GIN_ENABLE", 1);

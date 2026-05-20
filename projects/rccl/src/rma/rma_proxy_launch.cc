@@ -13,10 +13,30 @@
 #include "checks.h"
 #include "gdrwrap.h"
 #include "comm.h"
-#include "compiler.h"
+//#include "compiler.h"
+#include "nccl_merge_stubs.h"
 #include "rma/rma.h"
 #include "rma/rma_proxy.h"
 #include "dev_runtime.h"
+
+#ifndef CU_STREAM_WRITE_VALUE_DEFAULT
+#define CU_STREAM_WRITE_VALUE_DEFAULT 0
+#endif
+
+ncclResult_t ncclCuStreamBatchMemOp(hipStream_t stream, unsigned int numOps, hipStreamBatchMemOpParams* batchParams) {
+  ncclResult_t ret = ncclSuccess;
+  const unsigned int maxOpsPerBatch = 255;
+
+  for (unsigned int offset = 0; offset < numOps; offset += maxOpsPerBatch) {
+    unsigned int opsInThisChunk = (numOps - offset < maxOpsPerBatch) ? (numOps - offset) : maxOpsPerBatch;
+    CUCHECKGOTO(hipStreamBatchMemOp(stream, opsInThisChunk, &batchParams[offset], 0), ret, fail);
+  }
+
+exit:
+  return ret;
+fail:
+  goto exit;
+}
 
 // ---- Descriptor build ----
 
@@ -174,7 +194,7 @@ ncclResult_t ncclRmaProxyPutLaunch(struct ncclComm* comm, struct ncclKernelPlan*
 
   int opsPerTask = persistent ? 3 : 2;
   struct ncclRmaProxyDesc *desc = nullptr;
-  CUstreamBatchMemOpParams* batchParams = nullptr;
+  hipStreamBatchMemOpParams* batchParams = nullptr;
   NCCLCHECK(ncclCalloc(&batchParams, opsPerTask * nRmaTasksProxy));
 
   int batchIdx = 0;
@@ -275,7 +295,7 @@ ncclResult_t ncclRmaProxyWaitLaunch(struct ncclComm* comm, struct ncclKernelPlan
   assert(plan->rmaArgs->nRmaTasksProxy == 1);
 
   size_t opIdx = 0;
-  CUstreamBatchMemOpParams* batchParams = nullptr;
+  hipStreamBatchMemOpParams* batchParams = nullptr;
   struct ncclRmaProxyDesc* desc = nullptr;
 
   if (task->signalMode == NCCL_SIGNAL) {

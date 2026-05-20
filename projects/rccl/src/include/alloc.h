@@ -125,8 +125,17 @@ static inline ncclResult_t getSideStream(cudaStream_t *stream) {
   return ncclSuccess;
 }
 
-#if CUDART_VERSION >= 12020
+#ifndef CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID
+#define CU_DEVICE_ATTRIBUTE_HOST_NUMA_ID hipDeviceAttributeHostNumaId
+#endif
+#ifndef CU_MEM_LOCATION_TYPE_HOST_NUMA
+#define CU_MEM_LOCATION_TYPE_HOST_NUMA hipMemLocationTypeHostNuma
+#endif
+#ifndef CU_MEM_ALLOCATION_TYPE_PINNED
+#define CU_MEM_ALLOCATION_TYPE_PINNED hipMemAllocationTypePinned
+#endif
 
+#if CUDART_VERSION >= 12020 || HIP_VERSION >= 70253090
 static inline ncclResult_t ncclCuMemHostAlloc(void** ptr, CUmemGenericAllocationHandle *handlep, size_t size) {
   ncclResult_t result = ncclSuccess;
   size_t granularity = 0;
