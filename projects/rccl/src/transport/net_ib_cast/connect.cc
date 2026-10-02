@@ -8,6 +8,7 @@
 #include "connect_cast.h"
 #include "common_cast.h"
 #include "p2p_resiliency_cast.h"
+#include "udma_prof.h"
 
 #include <atomic>
 
@@ -459,6 +460,7 @@ static ncclResult_t ncclIbCreateQpIonic(struct ncclIbQpCreateAttr* createQpAttrs
   NCCLCHECK(wrap_ibv_create_qp(&qp->qp, createQpAttrs->pd, &qpInitAttr));
   NCCLCHECK(wrap_ionicdv_qp_set_gda(qp->qp, false, true));
   qp->ctsQpSlot = createQpAttrs->ctsQpSlot;
+  qp->udma = (udma_id == ncclIbCastUBMAHigh) ? 1 : (udma_id == ncclIbCastUBMALow) ? 0 : -1;
   return ncclSuccess;
 }
 
@@ -487,6 +489,7 @@ void IbCastBuildDataQpCreateAttr(struct ncclIbNetCommBase* base, int devIndex, s
 }
 
 ncclResult_t IbCastQpCreate(struct ncclIbQp* qp, struct ncclIbQpCreateAttr* createQpAttrs) {
+  qp->udma = -1;
   if (createQpAttrs->oooRq) {
      NCCLCHECK(ncclIbCreateQpMlx5(createQpAttrs, qp));
      return ncclSuccess;
@@ -593,6 +596,27 @@ ncclResult_t IbCastQpError(struct ncclIbQp* qp) {
   attr.qp_state = IBV_QPS_ERR;
   NCCLCHECK(wrap_ibv_modify_qp(qp->qp, &attr, IBV_QP_STATE));
   return ncclSuccess;
+}
+
+static void IbCastUdmaProfCopyRemote(struct ncclIbNetCommBase* base, const struct ncclIbConnectionMetadata* remMeta) {
+  memcpy(base->remHost, remMeta->hostName, sizeof(base->remHost));
+  base->remHost[sizeof(base->remHost) - 1] = '\0';
+  base->remPid = remMeta->pid;
+}
+
+static void IbCastUdmaProfOnConnected(struct ncclIbNetCommBase* base) {
+  if (!IbCastUdmaProfEnabled()) return;
+  for (int q = 0; q < base->nqps; q++) {
+    struct ncclIbQp* qp = &base->qps[q];
+    if (qp->qp == NULL) continue;
+    struct ncclIbNetCommDevBase* devBase = IbCastGetNetCommDevBase(base, qp->devIndex);
+    int ibDevN = devBase->ibDevN;
+    int qpIndexInDev = (base->vProps.ndevs > 0) ? (q / base->vProps.ndevs) : 0;
+    IbCastUdmaProfRegisterQp(base, q, qp->qp->qp_num, ibDevN, IbCastDevs[ibDevN].devName,
+                             qp->udma, base->isP2p, qp->isDataQp, qp->channelId, qpIndexInDev,
+                             base->remHost, base->remPid);
+  }
+  IbCastUdmaProfDump();
 }
 
 ncclResult_t IbCastListen(void* ctx, int dev, void* opaqueHandle, void** listenComm) {
@@ -916,6 +940,7 @@ ib_recv_dev_list:
   meta.ndevs = comm->base.vProps.ndevs;
   meta.isP2p = isP2p;
   meta.isRMA = handle->isRMA;
+  IbCastUdmaProfLocalId(meta.hostName, sizeof(meta.hostName), &meta.pid);
 
   // Create QPs on the sender side
   NCCLCHECKGOTO(IbCastSenderQpsCreate(comm, &meta, channelId), ret, fail);
@@ -1003,6 +1028,7 @@ ib_connect:
   if (stage->offset != sizeof(remMeta)) return ncclSuccess;
 
   memcpy(&remMeta, stage->buffer, sizeof(ncclIbConnectionMetadata));
+  IbCastUdmaProfCopyRemote(&comm->base, &remMeta);
 
   // ensure that the remote devices have the same link layer than the local devices used in the connection.
   if (comm->base.vProps.ndevs > 0) {
@@ -1043,6 +1069,7 @@ ib_connect:
   }
 
   NCCLCHECKGOTO(IbCastSenderQpsToRts(comm, &remMeta), ret, fail);
+  IbCastUdmaProfOnConnected(&comm->base);
 
   comm->base.ready = 1;
   stage->state = ncclIbCommStateConnected;
@@ -1439,6 +1466,7 @@ ib_recv:
 
   /* copy back the received info */
   memcpy(&remMeta, stage->buffer, sizeof(struct ncclIbConnectionMetadata));
+  IbCastUdmaProfCopyRemote(&rComm->base, &remMeta);
 
   rComm->base.isP2p = remMeta.isP2p;
   rComm->useCtsOffload = IbCastIsCtsOffloadEnabled(remMeta.isP2p);
@@ -1521,6 +1549,7 @@ ib_recv:
                             && (ncclParamIbCastGdrFlushDisable() == 0)) || remMeta.isRMA) ? 1 : 0;
 
   NCCLCHECKGOTO(IbCastReceiverQpsCreateToRts(rComm, &remMeta, &meta, channelId), ret, fail);
+  IbCastUdmaProfOnConnected(&rComm->base);
   if (rComm->prepostReceiveWorkRequests) {
     NCCLCHECKGOTO(IbCastReceiverPrePostReceiveWorkRequests(rComm), ret, fail);
   }
@@ -1597,6 +1626,7 @@ ib_recv:
 
   meta.ndevs = rComm->base.vProps.ndevs;
   meta.isP2p = remMeta.isP2p;
+  IbCastUdmaProfLocalId(meta.hostName, sizeof(meta.hostName), &meta.pid);
   strncpy(meta.devName, mergedDev->devName, MAX_MERGED_DEV_NAME);
 
   stage->state = ncclIbCommStateSend;
@@ -1634,6 +1664,7 @@ fail:
 ncclResult_t IbCastCloseSend(void* sendComm) {
   struct ncclIbSendComm* comm = (struct ncclIbSendComm*)sendComm;
   if (comm) {
+    IbCastUdmaProfDump();
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)
@@ -1666,6 +1697,7 @@ ncclResult_t IbCastCloseSend(void* sendComm) {
 ncclResult_t IbCastCloseRecv(void* recvComm) {
   struct ncclIbRecvComm* comm = (struct ncclIbRecvComm*)recvComm;
   if (comm) {
+    IbCastUdmaProfDump();
     NCCLCHECK(ncclSocketClose(&comm->base.sock));
 
     for (int q = 0; q < comm->base.nqps; q++)

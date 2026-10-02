@@ -256,6 +256,7 @@ if(BUILD_TESTS)
       RcclWrapTests.cpp
       TransportTests.cpp
       TimeoutTests.cpp
+      transport/UdmaProfTests.cpp
       mem_manager/MemManagerTests.cpp
       graph/XmlTests.cpp
       graph/TopoTests.cpp

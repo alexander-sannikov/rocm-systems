@@ -24,6 +24,7 @@ test_categories:
       - "Ipcsocket.*"
       - "XmlTest.*"
       - "TopoTest.*"
+      - "UdmaProf.*"
     exclude_windows:
       - "*"
     labels:

@@ -422,6 +422,8 @@ struct ncclIbQp {
   int8_t ctsQpSlot;
   int channelId;
   bool isDataQp;
+  // Selected AINIC uDMA pipeline: 0=low, 1=high, -1=none/unknown (non-ionic or policy 2).
+  int8_t udma;
 };
 
 // We need to support NCCL_NET_MAX_REQUESTS for each concurrent receive
@@ -497,6 +499,8 @@ struct alignas(32) ncclIbNetCommBase {
   bool remOooRq;
   bool localOooRq;
   bool isP2p;
+  char remHost[64];
+  int remPid;
   int recvMatchingScheme;
   int nDataQps;
   struct ncclIbDevInfo remDevs[NCCL_IB_MAX_DEVS_PER_NIC];

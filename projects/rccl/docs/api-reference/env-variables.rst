@@ -182,6 +182,22 @@ in the following table.
       - | Integer value in bytes (default: ``128``)
         | ``N``: Split only when message size >= N bytes
 
+    * - | ``RCCL_IB_UDMA_PROF``
+        | Enables the per-rank AINIC uDMA profiler in the net-ib-cast
+        | transport. Each rank records QP-to-uDMA assignments (source and
+        | destination ``host:pid``, nic, uDMA pipeline, and QP type
+        | ``p2p-data`` / ``p2p-cts`` / ``coll-data`` / ``coll-cts``) and
+        | counts posted data/CTS bytes per nic and uDMA.
+        | Writes ``$RCCL_IB_UDMA_PROF_DIR/rccl_udma_prof.<host>.<pid>.json``.
+        | Merge dumps with ``tools/scripts/udma_prof_summary.py``.
+      - | Integer (default: ``0``)
+        | ``0``: Disabled
+        | ``1``: Enabled
+
+    * - | ``RCCL_IB_UDMA_PROF_DIR``
+        | Directory for ``RCCL_IB_UDMA_PROF`` JSON dumps.
+      - | String path (default: ``.``)
+
     * - | ``NCCL_RINGS``
         | Defines custom ring topology.
       - | Ring topology specification string
