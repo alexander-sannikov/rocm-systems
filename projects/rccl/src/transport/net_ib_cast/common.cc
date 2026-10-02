@@ -50,6 +50,7 @@ ncclResult_t IbCastBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
     baseComm->activeQps[i] = &baseComm->qps[i];
     baseComm->qps[i].eceSupported = 0;
     baseComm->qps[i].ece = {0};
+    baseComm->qps[i].udma = -1;
     memset(&baseComm->qps[i].initAttr, 0, sizeof(baseComm->qps[i].initAttr));
     memset(&baseComm->qps[i].rtrAttr, 0, sizeof(baseComm->qps[i].rtrAttr));
     memset(&baseComm->qps[i].rtsAttr, 0, sizeof(baseComm->qps[i].rtsAttr));

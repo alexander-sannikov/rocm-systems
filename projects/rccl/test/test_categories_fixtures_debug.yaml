@@ -36,6 +36,7 @@ test_categories:
       - "TopoTest.*"
       - "TopoNicFusionTests.*"
       - "P2pMaxNchannels.*"
+      - "UdmaProf.*"
     exclude_windows:
       - "*"
     labels:

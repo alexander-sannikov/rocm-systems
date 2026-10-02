@@ -12,6 +12,7 @@
 #ifdef ENABLE_FAULT_INJECTION
 #include "net_ib_ops_fault.h"
 #endif
+#include "udma_prof.h"
 
 NCCL_PARAM(IbCastArThreshold, "IB_AR_THRESHOLD", -2);
 int64_t IbCastArThreshold = 8192;
@@ -302,6 +303,17 @@ ncclResult_t IbCastMultiSend(struct ncclIbSendComm* comm, int slot, int nqps, in
       }
     }
 #endif
+    if (IbCastUdmaProfEnabled()) {
+      uint64_t n = 0;
+      for (int r = 0; r < nreqs; r++) {
+        if (comm->wrs[r].sg_list && comm->wrs[r].num_sge)
+          n += comm->wrs[r].sg_list->length;
+      }
+      if (lastWr != comm->wrs + nreqs - 1 && lastWr->sg_list && lastWr->num_sge)
+        n += lastWr->sg_list->length;
+      struct ncclIbNetCommDevBase* devBase = IbCastGetNetCommDevBase(&comm->base, qp->devIndex);
+      IbCastUdmaProfAddBytes(devBase->ibDevN, qp->udma, comm->base.isP2p, 1, n);
+    }
     NCCLCHECK(wrap_ibv_post_send(qp->qp, comm->wrs, &bad_wr));
 
     // Update the send offset and addresses for the next QP according to the
@@ -570,6 +582,10 @@ ncclResult_t IbCastPostFifo(struct ncclIbRecvComm* comm, struct ncclIbRequest* r
         __func__, req, req->base, req->id, slot, req->nreqs, wr.wr_id, wr.opcode, wr.send_flags, ctsQp->qp->qp_num);
 
   struct ibv_send_wr* bad_wr;
+  if (IbCastUdmaProfEnabled()) {
+    struct ncclIbNetCommDevBase* devBase = IbCastGetNetCommDevBase(&comm->base, ctsQp->devIndex);
+    IbCastUdmaProfAddBytes(devBase->ibDevN, ctsQp->udma, comm->base.isP2p, 0, wr.sg_list[0].length);
+  }
   NCCLCHECK(wrap_ibv_post_send(ctsQp->qp, &wr, &bad_wr));
 
   TRACE(NCCL_NET,

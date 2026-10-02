@@ -17,6 +17,7 @@
 #include "p2p_resiliency_recovery_internal.h"
 #include "p2p_resiliency_recovery_ainic.h"
 #include "connect_cast.h"
+#include "udma_prof.h"
 
 /* Phase A: destroy+recreate QPs, recording new QPNs for exchange. */
 ncclResult_t IbCastPortRecoveryQpsRestoreAinic(struct ncclIbPortRecoveryContext* recoveryContext) {
@@ -47,6 +48,7 @@ ncclResult_t IbCastPortRecoveryQpsRestoreAinic(struct ncclIbPortRecoveryContext*
 
     INFO(NCCL_NET, "NET/IB: %s: Recreated QP %d on device %d (comm=%p, old_qp_num=%u, new_qp_num=%u)", __func__,
          qpIndex, recoveryContext->devIndex, recoveryContext->resCtx->baseComm, oldQpn, localQp->qp->qp_num);
+    IbCastUdmaProfUpdateQpn(recoveryContext->resCtx->baseComm, qpIndex, localQp->qp->qp_num);
 
     NCCLCHECK(IbCastQpInit(localQp));
 

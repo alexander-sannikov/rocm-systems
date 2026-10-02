@@ -475,6 +475,7 @@ if(BUILD_TESTS)
       SocketPollTests.cpp
       TransportTests.cpp
       TimeoutTests.cpp
+      transport/UdmaProfTests.cpp
       mem_manager/MemManagerTests.cpp
       graph/SearchTests.cpp
       graph/XmlTests.cpp
